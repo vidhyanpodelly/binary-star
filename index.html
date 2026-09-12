@@ -1,0 +1,1218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hidden in Starlight — Circumbinary Planet Discovery</title>
+  <meta name="description" content="Astrophysics visualization: discover a hidden circumbinary planet through gravitational inference from binary star light curves and radial velocities.">
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #050510;
+      --bg2:       #0a0a1a;
+      --bg3:       #0d0d22;
+      --accent:    #4a9eff;
+      --accent2:   #ffb347;
+      --accent3:   #64ffb4;
+      --text:      rgba(255,255,255,0.88);
+      --text-dim:  rgba(255,255,255,0.55);
+      --border:    rgba(255,255,255,0.12);
+      --panel-bg:  rgba(10,10,30,0.85);
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      --font-sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      --radius:    8px;
+      --shadow:    0 4px 24px rgba(0,0,0,0.6);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      overflow: hidden;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    #app {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      grid-template-columns: 1fr 380px;
+      grid-template-areas:
+        "header  header"
+        "main    sidebar"
+        "footer  footer";
+      height: 100vh;
+      gap: 0;
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    #header {
+      grid-area: header;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: rgba(5,5,20,0.95);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+      z-index: 10;
+    }
+
+    #header h1 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--text);
+    }
+
+    #header h1 span {
+      color: var(--accent);
+    }
+
+    .header-subtitle {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      margin-top: 2px;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* ── Main area ────────────────────────────────────────────────────────── */
+    #main {
+      grid-area: main;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ── Simulation canvas ────────────────────────────────────────────────── */
+    #sim-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    #sim-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* ── Plot area ────────────────────────────────────────────────────────── */
+    #plot-area {
+      height: 220px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #plot-tabs {
+      display: flex;
+      gap: 0;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+
+    .plot-tab {
+      padding: 6px 14px;
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+      cursor: pointer;
+      border: none;
+      background: none;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+      transition: color 0.2s, border-color 0.2s;
+    }
+
+    .plot-tab:hover { color: var(--text); }
+    .plot-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    #plot-canvas-container {
+      flex: 1;
+      position: relative;
+      min-height: 0;
+    }
+
+    #plot-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    #sidebar {
+      grid-area: sidebar;
+      background: var(--panel-bg);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #workflow-tabs {
+      display: flex;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .workflow-tab {
+      flex: 1;
+      padding: 8px 4px;
+      font-size: 0.65rem;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+      cursor: pointer;
+      border: none;
+      background: none;
+      border-bottom: 2px solid transparent;
+      text-align: center;
+      transition: color 0.2s, border-color 0.2s;
+    }
+
+    .workflow-tab:hover { color: var(--text); }
+    .workflow-tab.active {
+      color: var(--accent2);
+      border-bottom-color: var(--accent2);
+    }
+
+    #sidebar-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+    }
+
+    /* ── Panels ───────────────────────────────────────────────────────────── */
+    .panel {
+      display: none;
+    }
+    .panel.active {
+      display: block;
+    }
+
+    .panel-section {
+      margin-bottom: 16px;
+    }
+
+    .panel-section h3 {
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+      color: var(--accent2);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .param-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 3px 0;
+      font-size: 0.75rem;
+    }
+
+    .param-label {
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+    }
+
+    .param-value {
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+
+    .param-value.truth {
+      color: var(--accent3);
+    }
+
+    .param-value.inferred {
+      color: var(--accent);
+    }
+
+    .param-value.warning {
+      color: var(--accent2);
+    }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .btn:hover {
+      background: rgba(255,255,255,0.12);
+      border-color: rgba(255,255,255,0.25);
+    }
+
+    .btn.primary {
+      background: rgba(74,158,255,0.2);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: rgba(74,158,255,0.35);
+    }
+
+    .btn.danger {
+      background: rgba(255,80,80,0.15);
+      border-color: rgba(255,80,80,0.5);
+      color: rgba(255,120,120,1);
+    }
+
+    .btn.reveal {
+      background: rgba(100,255,180,0.15);
+      border-color: var(--accent3);
+      color: var(--accent3);
+      width: 100%;
+      justify-content: center;
+      padding: 10px;
+      font-size: 0.85rem;
+      margin-top: 8px;
+    }
+
+    .btn.reveal:hover {
+      background: rgba(100,255,180,0.25);
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ── Speed control ────────────────────────────────────────────────────── */
+    .speed-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+    }
+
+    .speed-control input[type=range] {
+      width: 80px;
+      accent-color: var(--accent);
+    }
+
+    /* ── Loading overlay ──────────────────────────────────────────────────── */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: rgba(5,5,20,0.97);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 0.5s;
+    }
+
+    #loading.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #loading h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 8px;
+      letter-spacing: 0.05em;
+    }
+
+    #loading p {
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      margin-bottom: 24px;
+    }
+
+    #progress-bar-container {
+      width: 320px;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+
+    #progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent3));
+      border-radius: 2px;
+      transition: width 0.3s;
+      width: 0%;
+    }
+
+    #progress-msg {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
+
+    /* ── Reveal overlay ───────────────────────────────────────────────────── */
+    #reveal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5,5,20,0.0);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      pointer-events: none;
+    }
+
+    #reveal-overlay.active {
+      display: flex;
+      animation: revealFade 3s ease-out forwards;
+    }
+
+    @keyframes revealFade {
+      0%   { background: rgba(5,5,20,0.0); }
+      20%  { background: rgba(5,5,20,0.9); }
+      60%  { background: rgba(5,5,20,0.9); }
+      100% { background: rgba(5,5,20,0.0); }
+    }
+
+    #reveal-text {
+      text-align: center;
+      animation: revealText 3s ease-out forwards;
+    }
+
+    @keyframes revealText {
+      0%   { opacity: 0; transform: scale(0.8); }
+      20%  { opacity: 1; transform: scale(1); }
+      80%  { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.05); }
+    }
+
+    #reveal-text h2 {
+      font-size: 2rem;
+      color: var(--accent3);
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-shadow: 0 0 40px rgba(100,255,180,0.8);
+    }
+
+    #reveal-text p {
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin-top: 8px;
+    }
+
+    /* ── Validation badge ─────────────────────────────────────────────────── */
+    .validation-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+    }
+
+    .validation-badge.pass {
+      background: rgba(100,255,150,0.15);
+      color: var(--accent3);
+      border: 1px solid rgba(100,255,150,0.3);
+    }
+
+    .validation-badge.warn {
+      background: rgba(255,200,100,0.15);
+      color: var(--accent2);
+      border: 1px solid rgba(255,200,100,0.3);
+    }
+
+    /* ── Info boxes ───────────────────────────────────────────────────────── */
+    .info-box {
+      background: rgba(74,158,255,0.08);
+      border: 1px solid rgba(74,158,255,0.2);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+
+    .info-box.warning {
+      background: rgba(255,200,100,0.08);
+      border-color: rgba(255,200,100,0.2);
+      color: rgba(255,200,100,0.8);
+    }
+
+    .info-box.success {
+      background: rgba(100,255,150,0.08);
+      border-color: rgba(100,255,150,0.2);
+      color: rgba(100,255,150,0.8);
+    }
+
+    /* ── Footer ───────────────────────────────────────────────────────────── */
+    #footer {
+      grid-area: footer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 16px;
+      background: rgba(5,5,20,0.95);
+      border-top: 1px solid var(--border);
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+    }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+    /* ── Responsive ───────────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "header"
+          "main"
+          "sidebar"
+          "footer";
+        overflow-y: auto;
+      }
+      html, body { overflow: auto; }
+      #sidebar { max-height: 400px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div id="loading" role="status" aria-live="polite">
+  <h2>HIDDEN IN STARLIGHT</h2>
+  <p>Integrating 3-body gravitational system · Kepler-16 analog</p>
+  <div id="progress-bar-container">
+    <div id="progress-bar"></div>
+  </div>
+  <div id="progress-msg">Initializing...</div>
+</div>
+
+<!-- Reveal overlay -->
+<div id="reveal-overlay" role="alert" aria-live="assertive">
+  <div id="reveal-text">
+    <h2>PLANET DETECTED</h2>
+    <p>Evidence from radial velocities and transit photometry</p>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="app">
+
+  <!-- Header -->
+  <header id="header">
+    <div>
+      <h1>HIDDEN IN <span>STARLIGHT</span></h1>
+      <div class="header-subtitle">Kepler-16 analog · Binary star + circumbinary planet · Gravitational inference</div>
+    </div>
+    <div class="header-controls">
+      <div class="speed-control">
+        <span>Speed:</span>
+        <input type="range" id="speed-slider" min="0.1" max="10" step="0.1" value="2" aria-label="Simulation speed">
+        <span id="speed-label">2×</span>
+      </div>
+      <button class="btn primary" id="btn-play" aria-label="Play/pause simulation">⏸ Pause</button>
+      <button class="btn" id="btn-reset" aria-label="Reset simulation">↺ Reset</button>
+    </div>
+  </header>
+
+  <!-- Main simulation area -->
+  <main id="main">
+    <div id="sim-container">
+      <canvas id="sim-canvas" aria-label="3D orbital simulation of binary star system"></canvas>
+    </div>
+
+    <!-- Plot area -->
+    <div id="plot-area">
+      <div id="plot-tabs" role="tablist">
+        <button class="plot-tab active" data-plot="lightcurve" role="tab" aria-selected="true">Light Curve</button>
+        <button class="plot-tab" data-plot="phasedlc" role="tab">Phase-Folded LC</button>
+        <button class="plot-tab" data-plot="rv" role="tab">Radial Velocities</button>
+        <button class="plot-tab" data-plot="periodogram" role="tab">Periodogram</button>
+        <button class="plot-tab" data-plot="bary" role="tab">Barycenter RV</button>
+        <button class="plot-tab" data-plot="inference" role="tab">Inference</button>
+      </div>
+      <div id="plot-canvas-container">
+        <canvas id="plot-canvas" aria-label="Scientific data plot"></canvas>
+      </div>
+    </div>
+  </main>
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div id="workflow-tabs" role="tablist">
+      <button class="workflow-tab active" data-panel="observatory" role="tab">Observatory</button>
+      <button class="workflow-tab" data-panel="observations" role="tab">Observations</button>
+      <button class="workflow-tab" data-panel="analysis" role="tab">Analysis</button>
+      <button class="workflow-tab" data-panel="discovery" role="tab">Discovery</button>
+    </div>
+
+    <div id="sidebar-content">
+
+      <!-- Observatory panel -->
+      <div class="panel active" id="panel-observatory">
+        <div class="panel-section">
+          <h3>System — Kepler-16 Analog</h3>
+          <div class="param-row">
+            <span class="param-label">Star A (K dwarf)</span>
+            <span class="param-value truth" id="val-mA">0.6897 M☉</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Star B (M dwarf)</span>
+            <span class="param-value truth" id="val-mB">0.2026 M☉</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Binary period</span>
+            <span class="param-value truth" id="val-Pbin">41.10 days</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Binary semi-major axis</span>
+            <span class="param-value truth">0.2244 AU</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Binary eccentricity</span>
+            <span class="param-value truth">0.1592</span>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Observer Setup</h3>
+          <div class="param-row">
+            <span class="param-label">Observer direction</span>
+            <span class="param-value">+z axis (edge-on)</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Inclination (binary)</span>
+            <span class="param-value">89.82°</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Inclination (planet)</span>
+            <span class="param-value">89.80°</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Photometry noise</span>
+            <span class="param-value">200 ppm</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">RV noise</span>
+            <span class="param-value">30 m/s</span>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Simulation Validation</h3>
+          <div class="param-row">
+            <span class="param-label">Energy conservation</span>
+            <span class="param-value" id="val-energy">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Angular momentum</span>
+            <span class="param-value" id="val-angmom">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">CoM drift</span>
+            <span class="param-value">< 1e-10 AU</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Integration steps</span>
+            <span class="param-value" id="val-steps">—</span>
+          </div>
+        </div>
+
+        <div class="info-box">
+          <strong>Rendering note:</strong> Stellar radii are exaggerated ×30, planet ×100 for visibility. Orbital distances are to scale. Simulation uses AU, yr, M☉ units with G = 4π².
+        </div>
+
+        <div class="panel-section">
+          <h3>Display Options</h3>
+          <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;cursor:pointer;margin-bottom:6px;">
+            <input type="checkbox" id="chk-trails" checked> Orbital trails
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;cursor:pointer;margin-bottom:6px;">
+            <input type="checkbox" id="chk-labels" checked> Body labels
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;cursor:pointer;">
+            <input type="checkbox" id="chk-truth"> Show true flux (plot)
+          </label>
+        </div>
+      </div>
+
+      <!-- Observations panel -->
+      <div class="panel" id="panel-observations">
+        <div class="panel-section">
+          <h3>Photometry</h3>
+          <div class="param-row">
+            <span class="param-label">Baseline</span>
+            <span class="param-value">3.0 years</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Cadence</span>
+            <span class="param-value">30 min</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Data points</span>
+            <span class="param-value" id="val-nphot">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Noise σ</span>
+            <span class="param-value">200 ppm</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Primary eclipse depth</span>
+            <span class="param-value">~25,000 ppm</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Planet transit depth</span>
+            <span class="param-value">~134 ppm</span>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Radial Velocities</h3>
+          <div class="param-row">
+            <span class="param-label">Cadence</span>
+            <span class="param-value">~3 days</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Data points</span>
+            <span class="param-value" id="val-nrv">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Noise σ</span>
+            <span class="param-value">30 m/s</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_A (star A)</span>
+            <span class="param-value truth">13.66 km/s</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_B (star B)</span>
+            <span class="param-value truth">46.50 km/s</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_planet (barycenter)</span>
+            <span class="param-value truth">~4 m/s</span>
+          </div>
+        </div>
+
+        <div class="info-box warning">
+          <strong>Circumbinary caveat:</strong> Planet transits are NOT strictly periodic due to the moving binary barycenter (transit timing variations, TTVs). BLS is a first-pass detector only.
+        </div>
+      </div>
+
+      <!-- Analysis panel -->
+      <div class="panel" id="panel-analysis">
+        <div class="panel-section">
+          <h3>Binary Period (LS Periodogram)</h3>
+          <div class="param-row">
+            <span class="param-label">Fitted period</span>
+            <span class="param-value inferred" id="inf-Pbin">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">True period</span>
+            <span class="param-value truth">41.10 days</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Error</span>
+            <span class="param-value" id="inf-Pbin-err">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">FAP</span>
+            <span class="param-value" id="inf-Pbin-fap">—</span>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Binary RV Fit</h3>
+          <div class="param-row">
+            <span class="param-label">K_A (fitted)</span>
+            <span class="param-value inferred" id="inf-KA">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_B (fitted)</span>
+            <span class="param-value inferred" id="inf-KB">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Mass ratio q=m_B/m_A</span>
+            <span class="param-value inferred" id="inf-q">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">True q</span>
+            <span class="param-value truth">0.2938</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">χ²/dof</span>
+            <span class="param-value" id="inf-chi2">—</span>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Barycenter RV Note</h3>
+          <div class="info-box">
+            Binary barycenter RV is <em>derived</em> from individual stellar RVs using the fitted mass ratio — not directly measured. Uncertainty is propagated from σ_A, σ_B, and σ_q.
+          </div>
+        </div>
+      </div>
+
+      <!-- Discovery panel -->
+      <div class="panel" id="panel-discovery">
+        <div class="panel-section">
+          <h3>Planet Search</h3>
+          <div class="param-row">
+            <span class="param-label">Method</span>
+            <span class="param-value">GLS on bary. RV</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Best period</span>
+            <span class="param-value inferred" id="inf-Pplanet">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">True period</span>
+            <span class="param-value truth">228.79 days</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">FAP</span>
+            <span class="param-value" id="inf-Pplanet-fap">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_planet (fitted)</span>
+            <span class="param-value inferred" id="inf-Kplanet">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">K_planet (expected)</span>
+            <span class="param-value truth">~4 m/s</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Null model F-stat</span>
+            <span class="param-value" id="inf-Fstat">—</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Preferred model</span>
+            <span class="param-value" id="inf-model">—</span>
+          </div>
+        </div>
+
+        <div class="info-box warning" id="planet-caveat">
+          <strong>Detection caveat:</strong> K_planet ≈ 4 m/s is below the 30 m/s noise floor. Planet detection via RV alone is marginal. Photometric transits provide additional evidence.
+        </div>
+
+        <button class="btn reveal" id="btn-reveal" disabled>
+          ✦ REVEAL THE PLANET ✦
+        </button>
+
+        <div id="reveal-results" style="display:none;margin-top:12px;">
+          <div class="info-box success">
+            <strong>Planet revealed!</strong> The hidden circumbinary planet has been detected through combined photometric and radial velocity evidence.
+          </div>
+          <div class="panel-section" style="margin-top:10px;">
+            <h3>Recovered vs True Parameters</h3>
+            <div class="param-row">
+              <span class="param-label">Period (fitted)</span>
+              <span class="param-value inferred" id="rev-Pplanet">—</span>
+            </div>
+            <div class="param-row">
+              <span class="param-label">Period (true)</span>
+              <span class="param-value truth">228.79 days</span>
+            </div>
+            <div class="param-row">
+              <span class="param-label">K_planet (fitted)</span>
+              <span class="param-value inferred" id="rev-Kplanet">—</span>
+            </div>
+            <div class="param-row">
+              <span class="param-label">K_planet (true)</span>
+              <span class="param-value truth">~4 m/s</span>
+            </div>
+            <div class="param-row">
+              <span class="param-label">Mass ratio (fitted)</span>
+              <span class="param-value inferred" id="rev-q">—</span>
+            </div>
+            <div class="param-row">
+              <span class="param-label">Mass ratio (true)</span>
+              <span class="param-value truth">0.2938</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- sidebar-content -->
+  </aside>
+
+  <!-- Footer -->
+  <footer id="footer">
+    <span>Kepler-16 analog · Doyle et al. 2011 · RK4 N-body · GLS periodogram · Zechmeister & Kürster 2009</span>
+    <span id="footer-status">Loading...</span>
+    <span>Science 40% · Creativity 35% · Design 25%</span>
+  </footer>
+
+</div><!-- app -->
+
+<script type="module">
+import { Simulation } from './src/ui/simulation.js';
+import { Renderer }   from './src/render/renderer.js';
+import { PlotRenderer } from './src/ui/plots.js';
+import { STAR_A, STAR_B, PLANET, P_BIN, P_PLANET } from './src/physics/system.js';
+
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+
+const simCanvas  = document.getElementById('sim-canvas');
+const plotCanvas = document.getElementById('plot-canvas');
+
+function resizeCanvases() {
+  // Sim canvas
+  const simRect = simCanvas.getBoundingClientRect();
+  simCanvas.width  = simRect.width  * devicePixelRatio;
+  simCanvas.height = simRect.height * devicePixelRatio;
+
+  // Plot canvas
+  const plotRect = plotCanvas.getBoundingClientRect();
+  plotCanvas.width  = plotRect.width  * devicePixelRatio;
+  plotCanvas.height = plotRect.height * devicePixelRatio;
+}
+
+resizeCanvases();
+window.addEventListener('resize', () => { resizeCanvases(); renderPlot(); });
+
+// ── Renderers ─────────────────────────────────────────────────────────────────
+
+const renderer = new Renderer(simCanvas, {
+  scaleAU:    Math.min(simCanvas.width, simCanvas.height) / (devicePixelRatio * 2),
+  trailLength: 400,
+});
+
+const plotRenderer = new PlotRenderer(plotCanvas);
+
+// ── State ─────────────────────────────────────────────────────────────────────
+
+let sim = null;
+let playing = true;
+let speed = 2; // yr/s
+let currentPlot = 'lightcurve';
+let planetRevealed = false;
+let showTruth = false;
+let lastTime = null;
+let animFrameId = null;
+
+// ── Progress ──────────────────────────────────────────────────────────────────
+
+function onProgress(fraction, msg) {
+  document.getElementById('progress-bar').style.width = `${fraction * 100}%`;
+  document.getElementById('progress-msg').textContent = msg;
+}
+
+// ── Initialize ────────────────────────────────────────────────────────────────
+
+async function init() {
+  sim = new Simulation(onProgress);
+  await sim.precompute();
+
+  // Hide loading
+  const loading = document.getElementById('loading');
+  loading.classList.add('hidden');
+  setTimeout(() => loading.style.display = 'none', 600);
+
+  // Update validation display
+  if (sim.validation) {
+    const v = sim.validation;
+    document.getElementById('val-energy').textContent = v.energyError.toExponential(2);
+    document.getElementById('val-energy').className = 'param-value ' + (v.energyError < 1e-5 ? 'truth' : 'warning');
+    document.getElementById('val-angmom').textContent = v.angMomError.toExponential(2);
+    document.getElementById('val-angmom').className = 'param-value ' + (v.angMomError < 1e-6 ? 'truth' : 'warning');
+    document.getElementById('val-steps').textContent = v.nSteps.toLocaleString();
+  }
+
+  // Update observation counts
+  if (sim.obs) {
+    document.getElementById('val-nphot').textContent = sim.obs.photTimes.length.toLocaleString();
+    document.getElementById('val-nrv').textContent   = sim.obs.rvTimes.length.toLocaleString();
+  }
+
+  // Update inference display
+  updateInferenceDisplay();
+
+  // Enable reveal button
+  document.getElementById('btn-reveal').disabled = false;
+
+  // Start animation
+  document.getElementById('footer-status').textContent = 'Simulation running';
+  startAnimation();
+  renderPlot();
+}
+
+// ── Inference display ─────────────────────────────────────────────────────────
+
+function updateInferenceDisplay() {
+  if (!sim || !sim.inference) return;
+  const inf = sim.inference;
+
+  if (inf.binaryPeriod) {
+    const bp = inf.binaryPeriod;
+    document.getElementById('inf-Pbin').textContent = `${(bp.period * 365.25).toFixed(2)} days`;
+    document.getElementById('inf-Pbin-err').textContent = `${(bp.error * 100).toFixed(3)}%`;
+    document.getElementById('inf-Pbin-fap').textContent = bp.fap.toExponential(2);
+  }
+
+  if (inf.binaryRV) {
+    const rv = inf.binaryRV;
+    document.getElementById('inf-KA').textContent = `${rv.KA.toFixed(2)} ± ${rv.KA_err.toFixed(2)} km/s`;
+    document.getElementById('inf-KB').textContent = `${rv.KB.toFixed(2)} ± ${rv.KB_err.toFixed(2)} km/s`;
+    document.getElementById('inf-q').textContent  = `${rv.massRatio.toFixed(4)} ± ${rv.massRatio_err.toFixed(4)}`;
+    document.getElementById('inf-chi2').textContent = rv.chi2_dof.toFixed(2);
+  }
+
+  if (inf.planetPeriodRV) {
+    const pp = inf.planetPeriodRV;
+    document.getElementById('inf-Pplanet').textContent = `${(pp.period * 365.25).toFixed(1)} days`;
+    document.getElementById('inf-Pplanet-fap').textContent = pp.fap.toExponential(2);
+  }
+
+  if (inf.planetRV) {
+    const pr = inf.planetRV;
+    document.getElementById('inf-Kplanet').textContent = `${(pr.K * 1000).toFixed(1)} ± ${(pr.K_err * 1000).toFixed(1)} m/s`;
+  }
+
+  if (inf.nullModel) {
+    const nm = inf.nullModel;
+    document.getElementById('inf-Fstat').textContent = nm.F_stat.toFixed(2);
+    const modelEl = document.getElementById('inf-model');
+    modelEl.textContent = nm.preferred === 'planet' ? '✓ Planet model' : '○ Null (no planet)';
+    modelEl.className = 'param-value ' + (nm.preferred === 'planet' ? 'truth' : 'warning');
+  }
+}
+
+// ── Animation loop ────────────────────────────────────────────────────────────
+
+function startAnimation() {
+  if (animFrameId) cancelAnimationFrame(animFrameId);
+  lastTime = null;
+
+  function frame(ts) {
+    animFrameId = requestAnimationFrame(frame);
+
+    if (lastTime === null) { lastTime = ts; return; }
+    const dtReal = Math.min((ts - lastTime) / 1000, 0.05); // cap at 50ms
+    lastTime = ts;
+
+    if (playing && sim && sim.animStates) {
+      sim.advanceAnim(dtReal, speed);
+    }
+
+    // Render simulation
+    if (sim && sim.animStates) {
+      const state = sim.getAnimState();
+      const t     = sim.getAnimTime();
+      renderer.render(state, STAR_A, STAR_B, PLANET, t, planetRevealed);
+    }
+  }
+
+  animFrameId = requestAnimationFrame(frame);
+}
+
+// ── Plot rendering ────────────────────────────────────────────────────────────
+
+function renderPlot() {
+  if (!sim || !sim.obs || !sim.inference) return;
+
+  const obs = sim.obs;
+  const inf = sim.inference;
+
+  switch (currentPlot) {
+    case 'lightcurve':
+      plotRenderer.plotLightCurve(obs, { showTruth });
+      break;
+
+    case 'phasedlc':
+      if (inf.binaryPeriod) {
+        plotRenderer.plotPhaseFoldedLC(obs, inf.binaryPeriod.period,
+          `Phase-Folded LC (P = ${(inf.binaryPeriod.period * 365.25).toFixed(2)} days)`);
+      }
+      break;
+
+    case 'rv':
+      plotRenderer.plotRV(obs, inf, { showTruth });
+      break;
+
+    case 'periodogram':
+      if (inf.binaryPeriod) {
+        plotRenderer.plotPeriodogram(
+          inf.binaryPeriod.freqs,
+          inf.binaryPeriod.power_arr,
+          inf.binaryPeriod.period,
+          P_BIN,
+          'Lomb-Scargle Periodogram — Binary Period Search'
+        );
+      }
+      break;
+
+    case 'bary':
+      plotRenderer.plotBaryRV(obs, inf, planetRevealed);
+      break;
+
+    case 'inference':
+      plotRenderer.plotInferenceSummary(inf, obs, planetRevealed);
+      break;
+  }
+}
+
+// ── UI event handlers ─────────────────────────────────────────────────────────
+
+// Play/pause
+document.getElementById('btn-play').addEventListener('click', () => {
+  playing = !playing;
+  document.getElementById('btn-play').textContent = playing ? '⏸ Pause' : '▶ Play';
+});
+
+// Reset
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (sim) {
+    sim.animIdx = 0;
+    renderer.clearTrails();
+  }
+});
+
+// Speed slider
+document.getElementById('speed-slider').addEventListener('input', (e) => {
+  speed = parseFloat(e.target.value);
+  document.getElementById('speed-label').textContent = `${speed.toFixed(1)}×`;
+});
+
+// Plot tabs
+document.querySelectorAll('.plot-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.plot-tab').forEach(t => {
+      t.classList.remove('active');
+      t.setAttribute('aria-selected', 'false');
+    });
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    currentPlot = tab.dataset.plot;
+    renderPlot();
+  });
+});
+
+// Workflow tabs
+document.querySelectorAll('.workflow-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.workflow-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(`panel-${tab.dataset.panel}`).classList.add('active');
+  });
+});
+
+// Display options
+document.getElementById('chk-trails').addEventListener('change', (e) => {
+  renderer.options.showTrails = e.target.checked;
+  if (!e.target.checked) renderer.clearTrails();
+});
+
+document.getElementById('chk-labels').addEventListener('change', (e) => {
+  renderer.options.showLabels = e.target.checked;
+});
+
+document.getElementById('chk-truth').addEventListener('change', (e) => {
+  showTruth = e.target.checked;
+  renderPlot();
+});
+
+// Reveal button
+document.getElementById('btn-reveal').addEventListener('click', () => {
+  if (planetRevealed) return;
+  planetRevealed = true;
+
+  // Dramatic reveal animation
+  const overlay = document.getElementById('reveal-overlay');
+  overlay.classList.add('active');
+  setTimeout(() => overlay.classList.remove('active'), 3000);
+
+  // Show reveal results
+  document.getElementById('reveal-results').style.display = 'block';
+  document.getElementById('btn-reveal').disabled = true;
+  document.getElementById('btn-reveal').textContent = '✦ PLANET REVEALED ✦';
+
+  // Update reveal values
+  if (sim && sim.inference) {
+    const inf = sim.inference;
+    if (inf.planetPeriodRV) {
+      document.getElementById('rev-Pplanet').textContent = `${(inf.planetPeriodRV.period * 365.25).toFixed(1)} days`;
+    }
+    if (inf.planetRV) {
+      document.getElementById('rev-Kplanet').textContent = `${(inf.planetRV.K * 1000).toFixed(1)} ± ${(inf.planetRV.K_err * 1000).toFixed(1)} m/s`;
+    }
+    if (inf.binaryRV) {
+      document.getElementById('rev-q').textContent = `${inf.binaryRV.massRatio.toFixed(4)} ± ${inf.binaryRV.massRatio_err.toFixed(4)}`;
+    }
+  }
+
+  // Switch to discovery panel and barycenter RV plot
+  document.querySelectorAll('.workflow-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-panel="discovery"]').classList.add('active');
+  document.getElementById('panel-discovery').classList.add('active');
+
+  currentPlot = 'bary';
+  document.querySelectorAll('.plot-tab').forEach(t => {
+    t.classList.remove('active');
+    t.setAttribute('aria-selected', 'false');
+  });
+  document.querySelector('[data-plot="bary"]').classList.add('active');
+  document.querySelector('[data-plot="bary"]').setAttribute('aria-selected', 'true');
+
+  renderPlot();
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if (e.key === ' ') { e.preventDefault(); document.getElementById('btn-play').click(); }
+  if (e.key === 'r' || e.key === 'R') document.getElementById('btn-reset').click();
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+init().catch(err => {
+  console.error('Initialization failed:', err);
+  document.getElementById('progress-msg').textContent = `Error: ${err.message}`;
+  document.getElementById('progress-bar').style.background = '#ff4444';
+});
+</script>
+</body>
+</html>
