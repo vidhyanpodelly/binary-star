@@ -1,0 +1,12 @@
+{
+  "name": "hidden-in-starlight",
+  "version": "1.0.0",
+  "description": "Astrophysics visualization: binary stars, circumbinary planet, gravitational inference",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/test_physics.js",
+    "serve": "python3 -m http.server 8080"
+  },
+  "keywords": ["astrophysics", "n-body", "binary-stars", "circumbinary-planet", "visualization"],
+  "license": "MIT"
+}
