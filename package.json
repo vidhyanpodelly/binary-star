@@ -7,6 +7,15 @@
     "test": "node tests/test_physics.js",
     "serve": "python3 -m http.server 8080"
   },
-  "keywords": ["astrophysics", "n-body", "binary-stars", "circumbinary-planet", "visualization"],
-  "license": "MIT"
+  "keywords": [
+    "astrophysics",
+    "n-body",
+    "binary-stars",
+    "circumbinary-planet",
+    "visualization"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.160.0"
+  }
 }

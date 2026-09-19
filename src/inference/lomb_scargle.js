@@ -191,3 +191,19 @@ export function phaseFold(t, y, period, t0 = 0) {
     y:     idx.map(i => y[i]),
   };
 }
+
+/**
+ * Determine physical bounds and create a frequency grid for a circumbinary planet RV search.
+ * Enforces Holman-Wiegert stability limit on the lower end, and baseline length on upper end.
+ */
+export function createPlanetRVSearchGrid(P_bin, e_bin, q, baseline, min_P_ratio = 4.0) {
+  const minP = P_bin * min_P_ratio;
+  const maxP = baseline * 0.5; // Require at least 2 full periods
+  
+  if (minP >= maxP) {
+    return { error: 'Observation baseline too short to reliably detect stable planet orbits.' };
+  }
+  
+  const freqs = frequencyGrid(baseline, minP, maxP, 10);
+  return { P_min: minP, P_max: maxP, freqs };
+}

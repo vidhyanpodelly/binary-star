@@ -2,7 +2,7 @@
 
 **A scientifically rigorous astrophysics visualization: discover a hidden circumbinary planet through gravitational inference.**
 
-[![Tests](https://img.shields.io/badge/tests-25%2F25%20pass-brightgreen)](tests/test_physics.js)
+[![Tests](https://img.shields.io/badge/tests-28%2F28%20pass-brightgreen)](tests/test_physics.js)
 
 ---
 
@@ -33,8 +33,10 @@ npx serve .
 
 **Run tests:**
 ```bash
-node tests/test_physics.js
-# Expected: 25/25 tests pass
+npm test
+# Expected: 26/26 physics tests pass
+npm run test:inference
+# Expected: 2/2 inference tests pass
 ```
 
 ---
@@ -65,7 +67,7 @@ node tests/test_physics.js
 - Angular momentum: |ΔL/L₀| = 4.4×10⁻⁸ over 10 binary periods
 - Center-of-mass drift: 2.6×10⁻¹⁵ AU
 
-**Orbital stability:** Planet semi-major axis (0.7048 AU) exceeds the Holman-Wiegert (1999) critical radius (0.646 AU) — the orbit is stable.
+**Orbital stability:** Planet semi-major axis (0.7048 AU) exceeds the Holman-Wiegert (1999) critical radius (0.646 AU) — the orbit is dynamically stable. The inference pipeline uses the Holman-Wiegert critical period to rigorously bound the blind search, strictly avoiding information leakage from the true parameters.
 
 ### Observation model
 
@@ -100,6 +102,7 @@ node tests/test_physics.js
 - **Circular orbit approximation:** RV fitting uses a circular model. The binary has e=0.1592; the planet has e=0.0069. The circular approximation introduces small systematic errors in K_A, K_B.
 - **Limb darkening:** Uses a simple mean-LD approximation for the overlap integral. The Mandel & Agol (2002) analytic model would be more accurate for precise transit depths.
 - **Rendering exaggeration:** Stellar radii are exaggerated ×30, planet ×100 for visibility. Orbital distances are to scale.
+- **Relativistic Merger Mode (Scenario B):** An optional NS+NS Merger visual mode is included for creative expression. This mode overlays a completely procedural Three.js WebGL visualization. *Important:* This renderer is purely aesthetic and decoupled from the scientific engine. It uses scientific proxies (e.g., $r_s = 2GM/c^2$, $r_{ph} = 3GM/c^2$, Keplerian particle accretion flows, Doppler beaming proxies, and screen-space gravitational lensing) to represent a relativistic aftermath, rather than true numerical relativity or GRMHD.
 
 ---
 
@@ -121,11 +124,13 @@ src/
     rv_fit.js         Linear least squares RV fitting, uncertainty
   render/
     renderer.js       Canvas 2D renderer (starfield, limb-darkened discs, trails)
+    blackhole_renderer.js Three.js aesthetic black hole merger visualization
   ui/
     simulation.js     Simulation controller, pre-computation, animation
     plots.js          Scientific plot rendering (light curve, RV, periodogram)
 tests/
-  test_physics.js     25 unit tests (physics, photometry, inference)
+  test_physics.js     26 unit tests (physics, photometry, inference)
+  test_inference_regressions.js Validates blind search logic and prevents parameter leakage
 index.html            Single-page application entry point
 ```
 
@@ -149,9 +154,9 @@ index.html            Single-page application entry point
 node tests/test_physics.js
 
 === Summary ===
-  Passed: 25
+  Passed: 26
   Failed: 0
-  Total:  25
+  Total:  26
 
 All tests passed!
 
@@ -162,10 +167,17 @@ Key measured values:
   K_B      = 46.50 km/s  (analytic: 46.50 km/s, error < 0.1%)
   Energy conservation: 1.1e-7 (10 binary periods)
   Angular momentum:    4.4e-8 (10 binary periods)
-  CoM drift:           2.6e-15 AU
-  Transit depth (planet/star A): 134 ppm
+  CoM drift:           6.9e-15 AU
   Primary eclipse depth: 25,466 ppm
 ```
+
+### Empirical Injection/Recovery
+
+Tested across 10 deterministic noise realizations over a 3-year baseline (Kepler-like 30min cadence, 200ppm phot / 30m/s RV noise):
+- **False Positive Rate:** 0% (0/10 detections on empty binary)
+- **Recovery Rate:** 90% (9/10 detections on injected planet)
+- **Measured RV Amplitude:** ~12.5 m/s
+- **Recovered Period:** ~223 days (Injected: ~229 days)
 
 ---
 

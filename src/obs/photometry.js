@@ -27,7 +27,8 @@ const LD_B = { u1: 0.55, u2: 0.20 }; // Star B (M dwarf, Teff~3311K)
 function limbDarkening(r_norm, u1, u2) {
   // r_norm = r/R ∈ [0,1]
   if (r_norm >= 1) return 0;
-  const mu = Math.sqrt(1 - r_norm * r_norm);
+  const mu_term = Math.max(0, 1 - r_norm * r_norm);
+  const mu = Math.sqrt(mu_term);
   return 1 - u1 * (1 - mu) - u2 * (1 - mu) ** 2;
 }
 
@@ -51,11 +52,16 @@ function circleIntersectionArea(r1, r2, d) {
 
   const d1 = (r1*r1 - r2*r2 + d*d) / (2*d);
   const d2 = d - d1;
-  const h1 = Math.sqrt(Math.max(0, r1*r1 - d1*d1));
-  const h2 = Math.sqrt(Math.max(0, r2*r2 - d2*d2));
+  const h1_term = Math.max(0, r1*r1 - d1*d1);
+  const h2_term = Math.max(0, r2*r2 - d2*d2);
+  const h1 = Math.sqrt(h1_term);
+  const h2 = Math.sqrt(h2_term);
 
-  const A1 = r1*r1 * Math.acos(Math.min(1, Math.max(-1, d1/r1))) - d1*h1;
-  const A2 = r2*r2 * Math.acos(Math.min(1, Math.max(-1, d2/r2))) - d2*h2;
+  const acos_arg1 = Math.max(-1, Math.min(1, d1/r1));
+  const acos_arg2 = Math.max(-1, Math.min(1, d2/r2));
+  
+  const A1 = r1*r1 * Math.acos(acos_arg1) - d1*h1;
+  const A2 = r2*r2 * Math.acos(acos_arg2) - d2*h2;
   return A1 + A2;
 }
 
@@ -103,7 +109,13 @@ export function computeFlux(state, starA, starB, planet) {
   const RP = planet.radius;
   const LA = starA.luminosity;
   const LB = starB.luminosity;
+  
   const Ltot = LA + LB;
+  if (!Number.isFinite(LA)) throw new Error(`LA invalid: ${LA}`);
+  if (!Number.isFinite(LB)) throw new Error(`LB invalid: ${LB}`);
+  if (!Number.isFinite(Ltot) || Ltot <= 0) throw new Error(`Ltot invalid: LA=${LA}, LB=${LB}, Ltot=${Ltot}`);
+  
+  if (!Number.isFinite(xA) || !Number.isFinite(xB)) throw new Error(`Invalid positions: xA=${xA}, xB=${xB}`);
 
   // Baseline flux (normalized)
   let fluxA = LA / Ltot;
@@ -112,13 +124,13 @@ export function computeFlux(state, starA, starB, planet) {
   // ── Binary eclipses ────────────────────────────────────────────────────────
   const dAB = Math.sqrt((xA-xB)**2 + (yA-yB)**2); // projected separation
 
-  if (dAB < RA + RB) {
+  if (dAB < RA + RB && Math.abs(zA - zB) > 0) {
     // Determine which star is in front (larger z = closer to observer)
     if (zA > zB) {
       // Star A is in front: A occults B
       const frac = occultedFlux(RB, RA, dAB, LD_B.u1, LD_B.u2);
       fluxB *= (1 - frac);
-    } else {
+    } else if (zB > zA) {
       // Star B is in front: B occults A
       const frac = occultedFlux(RA, RB, dAB, LD_A.u1, LD_A.u2);
       fluxA *= (1 - frac);
@@ -129,7 +141,7 @@ export function computeFlux(state, starA, starB, planet) {
   // Planet transits star A when planet is closer to observer (larger z) AND
   // projected separation is within sum of radii.
   const dPA = Math.sqrt((xP-xA)**2 + (yP-yA)**2);
-  if (dPA < RA + RP && zP > zA) {
+  if (dPA < RA + RP && zP > zA && Math.abs(zP - zA) > 0) {
     // Planet is in front of star A (planet closer to observer = larger z)
     const frac = occultedFlux(RA, RP, dPA, LD_A.u1, LD_A.u2);
     fluxA *= (1 - frac);
@@ -137,12 +149,16 @@ export function computeFlux(state, starA, starB, planet) {
 
   // Planet transits star B
   const dPB = Math.sqrt((xP-xB)**2 + (yP-yB)**2);
-  if (dPB < RB + RP && zP > zB) {
+  if (dPB < RB + RP && zP > zB && Math.abs(zP - zB) > 0) {
     const frac = occultedFlux(RB, RP, dPB, LD_B.u1, LD_B.u2);
     fluxB *= (1 - frac);
   }
 
-  return fluxA + fluxB;
+  const totalFlux = fluxA + fluxB;
+  if (!Number.isFinite(totalFlux)) {
+    throw new Error(`Total flux invalid: fluxA=${fluxA}, fluxB=${fluxB}`);
+  }
+  return totalFlux;
 }
 
 /**

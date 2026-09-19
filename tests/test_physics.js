@@ -22,7 +22,17 @@ import {
   centerOfMass, centerOfMassVelocity, getPosition, getVelocity
 } from '../src/physics/nbody.js';
 import { G_AU_YR_MSUN, AU_YR_TO_KMS, keplerPeriod } from '../src/physics/units.js';
-import { getSystemParams, STAR_A, STAR_B, PLANET, BINARY_ORBIT, PLANET_ORBIT, P_BIN, P_PLANET, A_CRIT } from '../src/physics/system.js';
+import { createSystemConfig } from '../src/physics/system.js';
+
+const config = createSystemConfig();
+const STAR_A = config.starA;
+const STAR_B = config.starB;
+const PLANET = config.planet;
+const BINARY_ORBIT = { a: config.aBin, e: config.eBin, inc: config.incBin, omega: config.omegaBin };
+const PLANET_ORBIT = { a: config.aPlanet, e: config.ePlanet, inc: config.incPlanet, omega: config.omegaPlanet };
+const P_BIN = config.P_BIN;
+const P_PLANET = config.P_PLANET;
+const A_CRIT = config.A_CRIT;
 import { computeFlux } from '../src/obs/photometry.js';
 import { computeRV, rvAmplitudeA, rvAmplitudeB } from '../src/obs/radialvelocity.js';
 import { lombScargle, frequencyGrid, findPeak, phaseFold, falseAlarmProbability } from '../src/inference/lomb_scargle.js';
@@ -97,8 +107,9 @@ test('Star B is cooler/redder than Star A (not blue-white)', () => {
 
 console.log('\n=== N-body Integration ===');
 
-const params = getSystemParams();
+const params = config;
 const { state: state0, masses } = buildInitialConditions(params);
+const radii = [STAR_A.radius, STAR_B.radius, PLANET.radius];
 
 test('Initial CoM position is at origin', () => {
   const [cx, cy, cz] = centerOfMass(state0, masses);
@@ -118,7 +129,7 @@ test('Initial CoM velocity is zero', () => {
 const dt = P_BIN / 200; // 200 steps per binary period
 const tEnd = 10 * P_BIN;
 console.log(`    Integrating ${tEnd.toFixed(4)} yr (10 P_bin) with dt=${dt.toExponential(3)} yr...`);
-const result = integrate(state0, masses, tEnd, dt, 1);
+const result = integrate(state0, masses, radii, tEnd, dt, 1);
 
 test('Energy conservation < 1e-6 over 10 binary periods', () => {
   console.log(`    Energy error: ${result.energyError.toExponential(3)}`);
@@ -144,12 +155,43 @@ test('CoM drift < 1e-10 AU over 10 binary periods', () => {
 const tEnd2 = 3 * P_PLANET;
 const dt2 = P_BIN / 100;
 console.log(`    Integrating ${tEnd2.toFixed(4)} yr (3 P_planet) with dt=${dt2.toExponential(3)} yr...`);
-const result2 = integrate(state0, masses, tEnd2, dt2, 1);
+const result2 = integrate(state0, masses, radii, tEnd2, dt2, 1);
 
 test('Energy conservation < 1e-5 over 3 planet periods', () => {
   console.log(`    Energy error: ${result2.energyError.toExponential(3)}`);
   assert(result2.energyError < 1e-5,
     `Energy error ${result2.energyError.toExponential(3)} exceeds 1e-5`);
+});
+
+test('Planet initial orbit is near-circular', () => {
+  // Over one planet period, measure distance to binary CoM
+  const tEndP = P_PLANET;
+  const dtP = P_BIN / 100;
+  const pResult = integrate(state0, masses, radii, tEndP, dtP, 1);
+  
+  let rMax = -Infinity;
+  let rMin = Infinity;
+  for (const s of pResult.states) {
+    const xA = s[0], yA = s[1], zA = s[2];
+    const xB = s[6], yB = s[7], zB = s[8];
+    const xP = s[12], yP = s[13], zP = s[14];
+    const mA = masses[0], mB = masses[1];
+    
+    const xCoM = (mA*xA + mB*xB) / (mA+mB);
+    const yCoM = (mA*yA + mB*yB) / (mA+mB);
+    const zCoM = (mA*zA + mB*zB) / (mA+mB);
+    
+    const r = Math.sqrt((xP-xCoM)**2 + (yP-yCoM)**2 + (zP-zCoM)**2);
+    if (r > rMax) rMax = r;
+    if (r < rMin) rMin = r;
+  }
+  
+  const eNumerical = (rMax - rMin) / (rMax + rMin);
+  console.log(`    Planet numerical eccentricity: ${eNumerical.toExponential(3)}`);
+  // Note: For a circumbinary planet at a ~ 3 a_bin, the binary's quadrupole moment
+  // causes short-period radial oscillations of ~1-2%. This manifests as a "numerical"
+  // eccentricity when just measuring rMax/rMin, even if the secular orbit is circular.
+  assert(eNumerical < 0.02, `Planet eccentricity ${eNumerical.toExponential(3)} exceeds 0.02 limit (quadrupole wobble)`);
 });
 
 // ── Test 3: RV amplitudes ─────────────────────────────────────────────────────
@@ -162,7 +204,7 @@ test('Star A RV amplitude matches analytic prediction', () => {
 
   // Measure from simulation: find max |vz_A| over one binary period
   const dtRV = P_BIN / 500;
-  const rvResult = integrate(state0, masses, P_BIN, dtRV, 1);
+  const rvResult = integrate(state0, masses, radii, P_BIN, dtRV, 1);
   const vzA_values = rvResult.states.map(s => s[5] * AU_YR_TO_KMS);
   const KA_sim = (Math.max(...vzA_values) - Math.min(...vzA_values)) / 2;
   console.log(`    K_A (simulated) = ${KA_sim.toFixed(2)} km/s`);
@@ -176,7 +218,7 @@ test('Star B RV amplitude matches analytic prediction', () => {
   console.log(`    K_B (analytic) = ${KB_analytic.toFixed(2)} km/s`);
 
   const dtRV = P_BIN / 500;
-  const rvResult = integrate(state0, masses, P_BIN, dtRV, 1);
+  const rvResult = integrate(state0, masses, radii, P_BIN, dtRV, 1);
   const vzB_values = rvResult.states.map(s => s[11] * AU_YR_TO_KMS);
   const KB_sim = (Math.max(...vzB_values) - Math.min(...vzB_values)) / 2;
   console.log(`    K_B (simulated) = ${KB_sim.toFixed(2)} km/s`);
@@ -240,9 +282,9 @@ test('Flux < 1.0 during planet transit', () => {
   assert(flux < 1.0, `Flux during transit should be < 1.0, got ${flux}`);
   const depth_ppm = (1 - flux) * 1e6;
   console.log(`    Planet transit depth: ${depth_ppm.toFixed(0)} ppm`);
-  // Planet transit depth ≈ (RP/RA)² ≈ (0.7538*R_Jup / 0.6489*R_sun)² ≈ 113 ppm
-  // With limb darkening at disc center, depth is slightly larger: ~130-150 ppm
-  assert(depth_ppm > 50 && depth_ppm < 5000, `Transit depth ${depth_ppm.toFixed(0)} ppm out of expected range [50, 5000]`);
+  // Planet transit depth ≈ (RP/RA)² ≈ (0.7538*0.1*R_sun / 0.6489*R_sun)² ≈ 13500 ppm
+  // With limb darkening at disc center, depth is slightly larger: ~16800 ppm
+  assert(depth_ppm > 10000 && depth_ppm < 25000, `Transit depth ${depth_ppm.toFixed(0)} ppm out of expected range [10000, 25000]`);
 });
 
 test('At least one transit occurs in 3 planet periods', () => {
@@ -250,7 +292,7 @@ test('At least one transit occurs in 3 planet periods', () => {
   let transitCount = 0;
   const dtPhot = P_BIN / 50; // sample at 50x binary period
   const tEndPhot = 3 * P_PLANET;
-  const photResult = integrate(state0, masses, tEndPhot, dtPhot, 1);
+  const photResult = integrate(state0, masses, radii, tEndPhot, dtPhot, 1);
 
   for (const s of photResult.states) {
     const flux = computeFlux(s, STAR_A, STAR_B, PLANET);

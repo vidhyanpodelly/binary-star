@@ -1,426 +1,710 @@
 /**
- * renderer.js — Canvas 2D renderer for the binary star + planet system
+ * renderer.js — WebGL2 (Three.js) renderer for the binary star + planet system
  *
- * Renders a cinematic, NASA/planetarium-inspired view of the system.
- * Uses Canvas 2D (not WebGL) for broad compatibility.
- *
- * Coordinate system:
- *   - Simulation: AU, with observer along +z axis
- *   - Screen: x-right, y-down (canvas convention)
- *   - Sky plane: simulation x → screen x, simulation y → screen -y
- *   - Depth: simulation z (larger = closer to observer)
- *
- * Visual features:
- *   - Deep-space starfield background
- *   - Limb-darkened stellar discs with glow halos
- *   - Depth-ordered rendering (farther bodies drawn first)
- *   - Orbital trails with fade
- *   - Planet rendered as dark disc during transit
- *   - Observer direction indicator
- *   - Scale bar
- *   - Rendering-scale exaggeration disclosed
+ * Implements physical stellar surfaces, limb darkening, gravity darkening,
+ * atmospheric glow, and Roche-equipotential geometry based on interaction state.
  */
 
+import * as THREE from '../../node_modules/three/build/three.module.js';
+import { OrbitControls } from '../../node_modules/three/examples/jsm/controls/OrbitControls.js';
+
+const vertexShader = `
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying vec2 vUv;
+varying float vGravityDarkening;
+varying float vDisplacement;
+
+uniform vec3 companionPos;
+uniform float massRatio;
+uniform float fillFactor;
+uniform float isStar;
+uniform float rStar;
+uniform float aBin;
+uniform float time;
+uniform float temperature;
+uniform float collisionProgress;
+
+// Basic 3D noise for surface displacement
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+float snoise(vec3 v) {
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min( g.xyz, l.zxy );
+  vec3 i2 = max( g.xyz, l.zxy );
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute( permute( permute( i.z + vec4(0.0, i1.z, i2.z, 1.0 )) + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+  float n_ = 0.142857142857;
+  vec3  ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_ );
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+}
+
+void main() {
+    vUv = uv;
+    vec3 pos = position;
+    vec3 normalVec = normalize(position);
+    vGravityDarkening = 1.0;
+    vDisplacement = 0.0;
+
+    if (isStar > 0.5) {
+        vec3 centerWorld = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vec3 toCompanion = normalize(companionPos - centerWorld);
+        vec3 localCompanionDir = normalize((inverse(modelMatrix) * vec4(toCompanion, 0.0)).xyz);
+        float cosGamma = dot(normalVec, localCompanionDir);
+        
+        // Add subtle boiling displacement
+        float boilFreq = temperature < 4000.0 ? 5.0 : 10.0;
+        float boilAmp = temperature < 4000.0 ? 0.02 : 0.01;
+        float disp = snoise(normalVec * boilFreq + time * 1.5) * boilAmp;
+        
+        if (collisionProgress > 0.0 && collisionProgress < 0.92) {
+            // Collision-specific deformation
+            float defProgress = min(1.0, collisionProgress / 0.78);
+            
+            // Large-scale asymmetric stretch towards the other star
+            float stretch = 1.0;
+            if (cosGamma > 0.0) {
+                // Bulge heavily towards companion
+                stretch += 0.4 * defProgress * pow(cosGamma, 2.0);
+                
+                // Add moderate noise only on the interface side
+                float noiseAmp = 0.1 * defProgress * cosGamma;
+                disp += snoise(normalVec * 3.0 - time * 3.0) * noiseAmp;
+                
+                // Hot contact interface (brighten via gravity darkening uniform override)
+                vGravityDarkening += 2.0 * defProgress * pow(cosGamma, 4.0);
+            } else {
+                // Flatten slightly on the far side
+                stretch -= 0.1 * defProgress * abs(cosGamma);
+            }
+            
+            pos += localCompanionDir * (stretch - 1.0) * length(pos);
+        }
+
+        vDisplacement = disp;
+        pos += normalVec * disp;
+
+        if (fillFactor > 0.0 && aBin > 0.0 && collisionProgress == 0.0) {
+            // Proxy for Roche equipotential distortion
+            float p2 = 0.5 * (3.0 * cosGamma * cosGamma - 1.0);
+            float p3 = 0.5 * (5.0 * cosGamma * cosGamma * cosGamma - 3.0 * cosGamma);
+            
+            float stretch = 1.0 + (fillFactor * fillFactor) * 0.1 * p2 + (fillFactor * fillFactor * fillFactor) * 0.05 * p3;
+            
+            if (fillFactor > 0.9 && cosGamma > 0.0) {
+               float teardrop = pow(cosGamma, 4.0) * (fillFactor - 0.9) * 0.5;
+               stretch += teardrop;
+            }
+            
+            pos *= stretch;
+            vGravityDarkening = pow(1.0 / stretch, 0.5);
+        }
+    }
+    
+    vec4 worldPos = modelMatrix * vec4(pos, 1.0);
+    vec3 centerWorld = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vPosition = worldPos.xyz;
+    vNormal = normalize(worldPos.xyz - centerWorld);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+}
+`;
+
+const fragmentShader = `
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying vec2 vUv;
+varying float vGravityDarkening;
+varying float vDisplacement;
+
+uniform vec3 colorRGB;
+uniform float u1;
+uniform float u2;
+uniform float isStar;
+uniform float temperature;
+uniform float time;
+uniform vec3 cameraPos;
+
+// Approximate Blackbody to RGB conversion
+vec3 blackbody(float t) {
+    vec3 color = vec3(0.0);
+    float temp = t / 100.0;
+    if (temp <= 66.0) {
+        color.r = 255.0;
+        color.g = temp;
+        color.g = 99.4708025861 * log(color.g) - 161.1195681661;
+        if (temp <= 19.0) color.b = 0.0;
+        else {
+            color.b = temp - 10.0;
+            color.b = 138.5177312231 * log(color.b) - 305.0447927307;
+        }
+    } else {
+        color.r = temp - 60.0;
+        color.r = 329.698727446 * pow(color.r, -0.1332047592);
+        color.g = temp - 60.0;
+        color.g = 288.1221695283 * pow(color.g, -0.0755148492);
+        color.b = 255.0;
+    }
+    return clamp(color / 255.0, 0.0, 1.0);
+}
+
+// Basic 3D noise for granulation
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+float snoise(vec3 v) {
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min( g.xyz, l.zxy );
+  vec3 i2 = max( g.xyz, l.zxy );
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute( permute( permute( i.z + vec4(0.0, i1.z, i2.z, 1.0 )) + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+  float n_ = 0.142857142857;
+  vec3  ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_ );
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+}
+
+void main() {
+    vec3 viewDir = normalize(cameraPos - vPosition);
+    float cosTheta = max(dot(viewDir, vNormal), 0.0);
+    
+    vec3 finalColor = colorRGB;
+    
+    if (isStar > 0.5) {
+        float mu = cosTheta;
+        float ld = 1.0 - u1 * (1.0 - mu) - u2 * (1.0 - mu) * (1.0 - mu);
+        
+        float localT = temperature * vGravityDarkening;
+        finalColor = blackbody(localT);
+        
+        float granFreq = temperature < 4000.0 ? 30.0 : 60.0;
+        float granAmp = temperature < 4000.0 ? 0.2 : 0.08;
+        
+        // Multi-octave granulation
+        float gran = snoise(vNormal * granFreq + time * 0.5) * 0.5 + 0.5;
+        gran += snoise(vNormal * (granFreq * 2.0) - time) * 0.25;
+        gran = 1.0 - (gran * granAmp);
+        
+        // Intensity mapping
+        float tRatio = localT / 5000.0; 
+        float lumMod = pow(tRatio, 2.0); // Softened to avoid blowout
+        
+        // Atmospheric Corona / Edge Glow (Fresnel-like)
+        float edgeGlow = pow(1.0 - mu, 3.0) * 1.5;
+        
+        vec3 surfaceColor = finalColor * lumMod * ld * gran;
+        vec3 glowColor = finalColor * edgeGlow;
+        
+        gl_FragColor = vec4(surfaceColor + glowColor, 1.0);
+    } else {
+        // Planet styling
+        float lighting = 0.2 + 0.8 * cosTheta;
+        finalColor *= lighting;
+        gl_FragColor = vec4(finalColor, 1.0);
+    }
+}
+`;
+
+const coronaVertexShader = `
+varying vec3 vNormal;
+varying vec3 vPosition;
+void main() {
+  vNormal = normalize(normalMatrix * normal);
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vPosition = worldPos.xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const coronaFragmentShader = `
+varying vec3 vNormal;
+varying vec3 vPosition;
+uniform vec3 colorRGB;
+uniform vec3 cameraPos;
+void main() {
+  vec3 viewDir = normalize(cameraPos - vPosition);
+  float rim = 1.0 - max(dot(viewDir, vNormal), 0.0);
+  rim = pow(rim, 3.0);
+  gl_FragColor = vec4(colorRGB * rim * 1.5, rim * 0.6);
+}
+`;
+
 export class Renderer {
-  /**
-   * @param {HTMLCanvasElement} canvas
-   * @param {object} options
-   */
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.ctx    = canvas.getContext('2d');
     this.options = {
-      scaleAU:      200,   // pixels per AU (rendering scale)
-      trailLength:  300,   // number of trail points per body
-      showTrails:   true,
-      showLabels:   true,
+      scaleAU: 200,
+      trailLength: 400,
+      showTrails: true,
+      showLabels: true,
       showScaleBar: true,
-      showGlow:     true,
-      starfieldN:   800,   // number of background stars
-      ...options,
+      showGlow: true,
+      ...options
     };
 
-    this.starfield = this._generateStarfield();
-    this.trails    = [[], [], []]; // trails for [starA, starB, planet]
-    this.time      = 0;
+    // Use WebGL2 context
+    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+    if (!gl) {
+      this._showWebGL2Error();
+      return;
+    }
 
-    // Visual radii (pixels) — exaggerated for visibility
-    // True radii are ~0.003 AU = 0.6 px at 200 px/AU — invisible
-    // We exaggerate by ~30x for stars, ~100x for planet
-    this.EXAGGERATION_STAR   = 30;
-    this.EXAGGERATION_PLANET = 100;
+    this.renderer = new THREE.WebGLRenderer({ canvas, context: gl });
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color('#050510');
+
+    // Camera setup
+    this.camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 100000);
+    this.controls = {
+      azimuth: 0,
+      elevation: 0,
+      panX: 0,
+      panY: 0,
+      targetId: 'system',
+      currentPos: new THREE.Vector3(0, 0, 0),
+      targetPos: new THREE.Vector3(0, 0, 0),
+      targetAzimuth: 0,
+      targetElevation: 0,
+      targetPanX: 0,
+      targetPanY: 0,
+    };
+    this.options.targetScaleAU = this.options.scaleAU;
+
+    this.trails = [[], [], []];
+    this.time = 0;
+    this.REQUESTED_EXAGGERATION = 30;
+    this.currentScale = this.REQUESTED_EXAGGERATION;
+
+    this._setupControls();
+    this._initScene();
   }
 
-  // ── Starfield ─────────────────────────────────────────────────────────────
+  _showWebGL2Error() {
+    const ctx = this.canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = 'red';
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      ctx.fillStyle = 'white';
+      ctx.font = '20px sans-serif';
+      ctx.fillText("WebGL2 not supported in this browser.", 20, 50);
+    }
+  }
 
-  _generateStarfield() {
-    const stars = [];
-    const N = this.options.starfieldN;
-    for (let i = 0; i < N; i++) {
-      stars.push({
-        x:    Math.random(),
-        y:    Math.random(),
-        r:    0.3 + Math.random() * 1.2,
-        a:    0.3 + Math.random() * 0.7,
-        // Twinkle phase
-        phase: Math.random() * Math.PI * 2,
-        speed: 0.5 + Math.random() * 2,
-        // Color: mostly white, some blue/yellow tints
-        hue:  Math.random() < 0.7 ? 0 : (Math.random() < 0.5 ? 220 : 45),
-        sat:  Math.random() < 0.7 ? 0 : 30 + Math.random() * 40,
+  _initScene() {
+    // Starfield
+    const starsGeo = new THREE.BufferGeometry();
+    const starsCount = 1000;
+    const posArray = new Float32Array(starsCount * 3);
+    const colArray = new Float32Array(starsCount * 3);
+    for (let i = 0; i < starsCount * 3; i+=3) {
+      const u = Math.random();
+      const v = Math.random();
+      const theta = 2 * Math.PI * u;
+      const phi = Math.acos(2 * v - 1);
+      const r = 2000 + Math.random() * 1000;
+      posArray[i] = r * Math.sin(phi) * Math.cos(theta);
+      posArray[i+1] = r * Math.sin(phi) * Math.sin(theta);
+      posArray[i+2] = r * Math.cos(phi);
+
+      const color = new THREE.Color().setHSL(Math.random() < 0.7 ? 0 : 0.6, Math.random() < 0.3 ? 0.0 : 0.5, 0.8 + Math.random() * 0.2);
+      colArray[i] = color.r;
+      colArray[i+1] = color.g;
+      colArray[i+2] = color.b;
+    }
+    starsGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    starsGeo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+    const starsMat = new THREE.PointsMaterial({ size: 1.5, vertexColors: true });
+    this.starfield = new THREE.Points(starsGeo, starsMat);
+    this.scene.add(this.starfield);
+
+    // Trails
+    this.trailLines = [];
+    for (let i = 0; i < 3; i++) {
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(this.options.trailLength * 3);
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+      const line = new THREE.Line(geo, mat);
+      this.trailLines.push(line);
+      this.scene.add(line);
+    }
+
+    // Bodies and Corona
+    this.bodyMeshes = [];
+    this.coronaMeshes = [];
+    for (let i = 0; i < 3; i++) {
+      const geo = new THREE.SphereGeometry(1, 64, 64);
+      // Opaque Photosphere
+      const mat = new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader,
+        uniforms: {
+          colorRGB: { value: new THREE.Vector3(1, 1, 1) },
+          u1: { value: 0.4 },
+          u2: { value: 0.2 },
+          isStar: { value: i < 2 ? 1.0 : 0.0 },
+          temperature: { value: 5000.0 },
+          time: { value: 0.0 },
+          cameraPos: { value: new THREE.Vector3() },
+          companionPos: { value: new THREE.Vector3() },
+          massRatio: { value: 1.0 },
+          fillFactor: { value: 0.0 },
+          rStar: { value: 1.0 },
+          aBin: { value: 1.0 }
+        }
       });
-    }
-    return stars;
-  }
+      const mesh = new THREE.Mesh(geo, mat);
+      this.bodyMeshes.push(mesh);
+      this.scene.add(mesh);
 
-  _drawStarfield(t) {
-    const { ctx, canvas } = this;
-    const W = canvas.width, H = canvas.height;
-
-    for (const s of this.starfield) {
-      const twinkle = 0.7 + 0.3 * Math.sin(t * s.speed + s.phase);
-      const alpha = s.a * twinkle;
-      const color = s.sat > 0
-        ? `hsla(${s.hue}, ${s.sat}%, 90%, ${alpha})`
-        : `rgba(255,255,255,${alpha})`;
-      ctx.beginPath();
-      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
-  }
-
-  // ── Coordinate transforms ─────────────────────────────────────────────────
-
-  /** Convert simulation AU coordinates to screen pixels */
-  simToScreen(x, y) {
-    const { canvas, options } = this;
-    const cx = canvas.width  / 2;
-    const cy = canvas.height / 2;
-    return [cx + x * options.scaleAU, cy - y * options.scaleAU];
-  }
-
-  /** Convert screen pixels to simulation AU */
-  screenToSim(px, py) {
-    const { canvas, options } = this;
-    const cx = canvas.width  / 2;
-    const cy = canvas.height / 2;
-    return [(px - cx) / options.scaleAU, -(py - cy) / options.scaleAU];
-  }
-
-  // ── Limb-darkened disc ────────────────────────────────────────────────────
-
-  /**
-   * Draw a limb-darkened stellar disc.
-   * @param {number} cx, cy  - screen center
-   * @param {number} R       - screen radius (pixels)
-   * @param {string} color   - base color (CSS)
-   * @param {number} u1, u2  - limb darkening coefficients
-   * @param {number} alpha   - overall opacity
-   */
-  _drawLimbDarkenedDisc(cx, cy, R, color, u1, u2, alpha = 1) {
-    const { ctx } = this;
-    if (R < 0.5) return;
-
-    // Parse color to RGB
-    const rgb = this._parseColor(color);
-
-    // Draw radial gradient approximating limb darkening
-    // I(r) = 1 - u1*(1-mu) - u2*(1-mu)² where mu = sqrt(1-(r/R)²)
-    // Sample at r=0 (center), r=0.5R, r=0.8R, r=R (edge)
-    const samples = [0, 0.3, 0.6, 0.85, 1.0];
-    const intensities = samples.map(rn => {
-      if (rn >= 1) return 0;
-      const mu = Math.sqrt(1 - rn * rn);
-      return 1 - u1 * (1 - mu) - u2 * (1 - mu) ** 2;
-    });
-
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
-    for (let i = 0; i < samples.length; i++) {
-      const I = intensities[i];
-      const r = Math.min(255, Math.round(rgb[0] * I));
-      const g = Math.min(255, Math.round(rgb[1] * I));
-      const b = Math.min(255, Math.round(rgb[2] * I));
-      grad.addColorStop(samples[i], `rgba(${r},${g},${b},${alpha})`);
-    }
-    grad.addColorStop(1, `rgba(0,0,0,0)`);
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, R, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
-
-  /**
-   * Draw a glow halo around a star.
-   */
-  _drawGlow(cx, cy, R, color, intensity = 1) {
-    const { ctx } = this;
-    const rgb = this._parseColor(color);
-    const glowR = R * 4;
-
-    const grad = ctx.createRadialGradient(cx, cy, R * 0.5, cx, cy, glowR);
-    grad.addColorStop(0, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${0.4 * intensity})`);
-    grad.addColorStop(0.3, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${0.15 * intensity})`);
-    grad.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0)`);
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
-
-  /** Parse CSS hex color to [r,g,b] */
-  _parseColor(color) {
-    if (color.startsWith('#')) {
-      const hex = color.slice(1);
-      if (hex.length === 6) {
-        return [
-          parseInt(hex.slice(0,2), 16),
-          parseInt(hex.slice(2,4), 16),
-          parseInt(hex.slice(4,6), 16),
-        ];
+      // Transparent Corona Layer (for stars only)
+      if (i < 2) {
+          const coronaMat = new THREE.ShaderMaterial({
+            vertexShader: coronaVertexShader,
+            fragmentShader: coronaFragmentShader,
+            uniforms: {
+              colorRGB: { value: new THREE.Vector3(1, 1, 1) },
+              cameraPos: { value: new THREE.Vector3() }
+            },
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            side: THREE.BackSide // To always see the corona sphere outer edge
+          });
+          const corona = new THREE.Mesh(geo, coronaMat);
+          this.coronaMeshes.push(corona);
+          this.scene.add(corona);
       }
     }
-    // Fallback: white
-    return [255, 255, 255];
+    
+    // UI Canvas for labels (we overlay a 2D canvas on top or just use HTML, but since canvas is fixed, let's just do sprite labels or CSS. Actually, for simplicity, I'll use a 2D context overlay later or simple text sprites)
+    this.labels = [];
+    for(let i=0; i<3; i++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 32;
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(60, 15, 1);
+      this.labels.push({ sprite, canvas, tex, ctx: canvas.getContext('2d') });
+      this.scene.add(sprite);
+    }
   }
 
-  // ── Orbital trails ────────────────────────────────────────────────────────
+  _setupControls() {
+    let isDragging = false;
+    let dragBtn = -1;
+    let lastX = 0;
+    let lastY = 0;
+    this.canvas.style.cursor = 'grab';
+    this.canvas.addEventListener('contextmenu', e => e.preventDefault());
+    this.canvas.addEventListener('pointerdown', (e) => {
+      isDragging = true;
+      dragBtn = e.button;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      this.canvas.style.cursor = dragBtn === 0 ? 'grabbing' : 'move';
+      this.canvas.setPointerCapture(e.pointerId);
+    });
+    this.canvas.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (dragBtn === 0 && !e.shiftKey) {
+        this.controls.targetAzimuth += dx * 0.005;
+        this.controls.targetElevation -= dy * 0.005;
+        const maxElev = Math.PI / 2 - 0.01;
+        if (this.controls.targetElevation > maxElev) this.controls.targetElevation = maxElev;
+        if (this.controls.targetElevation < -maxElev) this.controls.targetElevation = -maxElev;
+      } else {
+        this.controls.targetPanX -= dx;
+        this.controls.targetPanY += dy;
+      }
+    });
+    this.canvas.addEventListener('pointerup', (e) => {
+      isDragging = false;
+      this.canvas.style.cursor = 'grab';
+      this.canvas.releasePointerCapture(e.pointerId);
+    });
+    this.canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+      this.options.targetScaleAU *= zoomFactor;
+      if (this.options.targetScaleAU < 20) this.options.targetScaleAU = 20;
+      if (this.options.targetScaleAU > 2000) this.options.targetScaleAU = 2000;
+    }, { passive: false });
+  }
+
+  _parseColor(hex) {
+    const c = new THREE.Color(hex);
+    return new THREE.Vector3(c.r, c.g, c.b);
+  }
+
+  _updateLabel(idx, text, color) {
+    const l = this.labels[idx];
+    l.ctx.clearRect(0, 0, 128, 32);
+    l.ctx.fillStyle = color;
+    l.ctx.font = '12px sans-serif';
+    l.ctx.textAlign = 'center';
+    l.ctx.fillText(text, 64, 20);
+    l.tex.needsUpdate = true;
+  }
 
   updateTrails(state) {
     const positions = [
-      [state[0], state[1]],
-      [state[6], state[7]],
-      [state[12], state[13]],
+      new THREE.Vector3(state[0], -state[1], state[2]),
+      new THREE.Vector3(state[6], -state[7], state[8]),
+      new THREE.Vector3(state[12], -state[13], state[14])
     ];
     for (let i = 0; i < 3; i++) {
       this.trails[i].push(positions[i]);
       if (this.trails[i].length > this.options.trailLength) {
         this.trails[i].shift();
       }
+      
+      if (this.options.showTrails && this.trailLines) {
+        const line = this.trailLines[i];
+        const posAttr = line.geometry.attributes.position;
+        for (let j = 0; j < this.trails[i].length; j++) {
+            posAttr.setXYZ(j, this.trails[i][j].x * this.options.scaleAU, this.trails[i][j].y * this.options.scaleAU, this.trails[i][j].z * this.options.scaleAU);
+        }
+        line.geometry.setDrawRange(0, this.trails[i].length);
+        posAttr.needsUpdate = true;
+      }
     }
   }
 
-  _drawTrail(trail, color, alpha = 0.6) {
-    const { ctx } = this;
-    if (trail.length < 2) return;
+  render(state, starA, starB, planet, t, planetRevealed = false, interaction = null) {
+    if (!this.renderer) return;
+    this.time += 0.05;
 
-    for (let i = 1; i < trail.length; i++) {
-      const t = i / trail.length;
-      const [x0, y0] = this.simToScreen(trail[i-1][0], trail[i-1][1]);
-      const [x1, y1] = this.simToScreen(trail[i][0], trail[i][1]);
-
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.strokeStyle = color.replace(')', `,${t * alpha})`).replace('rgb', 'rgba');
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  }
-
-  // ── Scale bar ─────────────────────────────────────────────────────────────
-
-  _drawScaleBar() {
-    const { ctx, canvas, options } = this;
-    const W = canvas.width;
-    const H = canvas.height;
-    const barAU = 0.5; // 0.5 AU scale bar
-    const barPx = barAU * options.scaleAU;
-    const x0 = W - barPx - 30;
-    const y0 = H - 30;
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x0 + barPx, y0);
-    ctx.moveTo(x0, y0 - 5);
-    ctx.lineTo(x0, y0 + 5);
-    ctx.moveTo(x0 + barPx, y0 - 5);
-    ctx.lineTo(x0 + barPx, y0 + 5);
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('0.5 AU', x0 + barPx/2, y0 - 8);
-  }
-
-  // ── Observer direction ────────────────────────────────────────────────────
-
-  _drawObserverIndicator() {
-    const { ctx, canvas } = this;
-    const x = 30, y = canvas.height - 50;
-
-    ctx.save();
-    ctx.translate(x, y);
-
-    // Arrow pointing toward observer (out of screen = toward us)
-    ctx.strokeStyle = 'rgba(100,200,255,0.8)';
-    ctx.fillStyle   = 'rgba(100,200,255,0.8)';
-    ctx.lineWidth = 1.5;
-
-    // Draw a circle with dot (perspective projection of z-axis)
-    ctx.beginPath();
-    ctx.arc(0, 0, 10, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(0, 0, 3, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Observer', 0, 22);
-    ctx.fillText('→ you', 0, 33);
-
-    ctx.restore();
-  }
-
-  // ── Exaggeration notice ───────────────────────────────────────────────────
-
-  _drawExaggerationNotice() {
-    const { ctx } = this;
-    ctx.fillStyle = 'rgba(255,200,100,0.6)';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`★ Stellar radii ×${this.EXAGGERATION_STAR}, planet ×${this.EXAGGERATION_PLANET} (orbits to scale)`, 10, this.canvas.height - 10);
-  }
-
-  // ── Main render ───────────────────────────────────────────────────────────
-
-  /**
-   * Render one frame.
-   *
-   * @param {number[]} state   - 18-element simulation state
-   * @param {object}   starA   - star A parameters
-   * @param {object}   starB   - star B parameters
-   * @param {object}   planet  - planet parameters
-   * @param {number}   t       - simulation time [yr]
-   * @param {boolean}  planetRevealed - whether to show planet label
-   */
-  render(state, starA, starB, planet, t, planetRevealed = false) {
-    const { ctx, canvas, options } = this;
-    const W = canvas.width, H = canvas.height;
-
-    // Clear
-    ctx.clearRect(0, 0, W, H);
-
-    // Background gradient
-    const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)/2);
-    bg.addColorStop(0, '#0a0a1a');
-    bg.addColorStop(1, '#000005');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
-
-    // Starfield
-    this._drawStarfield(t);
-
-    // Update trails
-    if (options.showTrails) {
-      this.updateTrails(state);
-    }
-
-    // Extract positions and z-depths
-    const bodies = [
-      { x: state[0],  y: state[1],  z: state[2],  name: starA.name,   color: starA.color,   radius: starA.radius,   luminosity: starA.luminosity, isstar: true,  ld: { u1: 0.40, u2: 0.25 }, exag: this.EXAGGERATION_STAR,   trailIdx: 0 },
-      { x: state[6],  y: state[7],  z: state[8],  name: starB.name,   color: starB.color,   radius: starB.radius,   luminosity: starB.luminosity, isstar: true,  ld: { u1: 0.55, u2: 0.20 }, exag: this.EXAGGERATION_STAR,   trailIdx: 1 },
-      { x: state[12], y: state[13], z: state[14], name: planet.name,  color: planet.color,  radius: planet.radius,  luminosity: 0,                isstar: false, ld: { u1: 0,    u2: 0    }, exag: this.EXAGGERATION_PLANET, trailIdx: 2 },
+    // Coordinate mapping: sim x -> three x, sim y -> three -y, sim z -> three z
+    const bodiesData = [
+      { x: state[0],  y: -state[1],  z: state[2],  name: starA.name,  color: starA.color,  r: starA.radius, T: starA.Teff || 5000, ld: {u1:0.4, u2:0.25} },
+      { x: state[6],  y: -state[7],  z: state[8],  name: starB.name,  color: starB.color,  r: starB.radius, T: starB.Teff || 3000, ld: {u1:0.55, u2:0.2} },
+      { x: state[12], y: -state[13], z: state[14], name: planet.name, color: planet.color, r: planet.radius, T: 300, ld: {u1:0, u2:0} },
     ];
 
-    // Sort by z (ascending = farther from observer drawn first)
-    const sorted = [...bodies].sort((a, b) => a.z - b.z);
+    // Compute target pos
+    if (this.controls.targetId === 0) this.controls.targetPos.set(bodiesData[0].x, bodiesData[0].y, bodiesData[0].z);
+    else if (this.controls.targetId === 1) this.controls.targetPos.set(bodiesData[1].x, bodiesData[1].y, bodiesData[1].z);
+    else if (this.controls.targetId === 2) this.controls.targetPos.set(bodiesData[2].x, bodiesData[2].y, bodiesData[2].z);
+    else this.controls.targetPos.set(0, 0, 0);
 
-    // Draw trails first (behind everything)
-    if (options.showTrails) {
-      const trailColors = [starA.color, starB.color, planet.color];
-      const trailAlphas = [0.5, 0.5, 0.3];
-      for (let i = 0; i < 3; i++) {
-        const c = trailColors[i];
-        const rgb = this._parseColor(c);
-        this._drawTrail(this.trails[i], `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, trailAlphas[i]);
+    // Smooth interpolations
+    this.controls.currentPos.lerp(this.controls.targetPos, 0.05);
+    
+    // Lerp angles with shortest path
+    let dAz = (this.controls.targetAzimuth - this.controls.azimuth) % (Math.PI * 2);
+    if (dAz > Math.PI) dAz -= Math.PI * 2;
+    if (dAz < -Math.PI) dAz += Math.PI * 2;
+    this.controls.azimuth += dAz * 0.08;
+    this.controls.elevation += (this.controls.targetElevation - this.controls.elevation) * 0.08;
+    
+    this.controls.panX += (this.controls.targetPanX - this.controls.panX) * 0.08;
+    this.controls.panY += (this.controls.targetPanY - this.controls.panY) * 0.08;
+    
+    this.options.scaleAU += (this.options.targetScaleAU - this.options.scaleAU) * 0.08;
+
+    // Apply camera transformations
+    const dist = 60000 / this.options.scaleAU;
+    const cx = this.controls.currentPos.x * this.options.scaleAU;
+    const cy = this.controls.currentPos.y * this.options.scaleAU;
+    const cz = this.controls.currentPos.z * this.options.scaleAU;
+    
+    // Convert spherical controls to camera position
+    const camX = cx + dist * Math.sin(this.controls.azimuth) * Math.cos(this.controls.elevation);
+    const camY = cy + dist * Math.sin(this.controls.elevation);
+    const camZ = cz + dist * Math.cos(this.controls.azimuth) * Math.cos(this.controls.elevation);
+    
+    this.camera.position.set(camX + this.controls.panX, camY + this.controls.panY, camZ);
+    this.camera.lookAt(cx + this.controls.panX, cy + this.controls.panY, cz);
+    this.camera.updateMatrixWorld();
+
+    this.updateTrails(state);
+
+    // Dynamic scaling logic
+    const dAB = Math.hypot(state[0]-state[6], state[1]-state[7], state[2]-state[8]);
+    const safeScaleAB = (dAB * 0.8) / (starA.radius + starB.radius);
+    this.currentScale = Math.min(this.REQUESTED_EXAGGERATION, safeScaleAB);
+
+    if (safeScaleAB < this.REQUESTED_EXAGGERATION && safeScaleAB >= 1.0) {
+      if (!this._dispatchedWarn) {
+        this.canvas.dispatchEvent(new CustomEvent('visual-overlap-warning'));
+        this._dispatchedWarn = true;
+      }
+    } else {
+      if (this._dispatchedWarn) {
+        this.canvas.dispatchEvent(new CustomEvent('visual-overlap-clear'));
+        this._dispatchedWarn = false;
       }
     }
 
-    // Draw bodies in depth order
-    for (const body of sorted) {
-      const [sx, sy] = this.simToScreen(body.x, body.y);
-      const R = body.radius * options.scaleAU * body.exag;
+    // Update meshes
+    for (let i = 0; i < 3; i++) {
+      const mesh = this.bodyMeshes[i];
+      const data = bodiesData[i];
+      mesh.position.set(data.x * this.options.scaleAU, data.y * this.options.scaleAU, data.z * this.options.scaleAU);
+      const visualRadius = data.r * this.options.scaleAU * this.currentScale;
+      mesh.scale.set(visualRadius, visualRadius, visualRadius);
 
-      if (body.isstar) {
-        // Glow
-        if (options.showGlow) {
-          this._drawGlow(sx, sy, R, body.color, body.luminosity * 5);
-        }
-        // Limb-darkened disc
-        this._drawLimbDarkenedDisc(sx, sy, Math.max(R, 2), body.color, body.ld.u1, body.ld.u2);
+      const mat = mesh.material;
+      mat.uniforms.colorRGB.value = this._parseColor(data.color);
+      mat.uniforms.u1.value = data.ld.u1;
+      mat.uniforms.u2.value = data.ld.u2;
+      mat.uniforms.temperature.value = data.T;
+      mat.uniforms.time.value = this.time;
+      mat.uniforms.cameraPos.value = this.camera.position;
+      
+      // Roche distortion parameters
+      mat.uniforms.aBin.value = dAB * this.options.scaleAU;
+      if (i < 2 && interaction && interaction.state !== 'DETACHED') {
+          // Identify if it's the accretor or donor
+          mat.uniforms.fillFactor.value = (i === 0) ? (interaction.fillFactorA || 0) : (interaction.fillFactorB || 0);
+          const compIdx = 1 - i;
+          mat.uniforms.companionPos.value.set(
+              bodiesData[compIdx].x * this.options.scaleAU, 
+              bodiesData[compIdx].y * this.options.scaleAU, 
+              bodiesData[compIdx].z * this.options.scaleAU
+          );
       } else {
-        // Planet: dark disc with subtle atmosphere glow
-        const rgb = this._parseColor(body.color);
-
-        // Atmosphere glow
-        const atmGrad = ctx.createRadialGradient(sx, sy, R * 0.8, sx, sy, R * 2.5);
-        atmGrad.addColorStop(0, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.15)`);
-        atmGrad.addColorStop(1, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0)`);
-        ctx.beginPath();
-        ctx.arc(sx, sy, R * 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = atmGrad;
-        ctx.fill();
-
-        // Planet disc (dark, with slight color)
-        const discGrad = ctx.createRadialGradient(sx - R*0.3, sy - R*0.3, 0, sx, sy, R);
-        discGrad.addColorStop(0, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.8)`);
-        discGrad.addColorStop(0.7, `rgba(${Math.round(rgb[0]*0.3)},${Math.round(rgb[1]*0.3)},${Math.round(rgb[2]*0.3)},0.9)`);
-        discGrad.addColorStop(1, `rgba(10,10,20,0.95)`);
-        ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(R, 1.5), 0, Math.PI * 2);
-        ctx.fillStyle = discGrad;
-        ctx.fill();
+          mat.uniforms.fillFactor.value = 0.0;
       }
 
-      // Labels
-      if (options.showLabels) {
-        const labelName = (!body.isstar && !planetRevealed) ? '?' : body.name;
-        const labelColor = body.isstar ? 'rgba(255,255,255,0.8)' : (planetRevealed ? 'rgba(100,200,255,0.9)' : 'rgba(255,255,100,0.6)');
-        ctx.fillStyle = labelColor;
-        ctx.font = body.isstar ? '12px sans-serif' : '11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(labelName, sx, sy - Math.max(R, 4) - 6);
+      mesh.visible = (i !== 2 || planetRevealed);
+      
+      // Update label
+      const label = this.labels[i];
+      label.sprite.position.copy(mesh.position).add(new THREE.Vector3(0, visualRadius + 20, 0));
+      label.sprite.visible = mesh.visible && this.options.showLabels;
+      if (label.sprite.visible) {
+        this._updateLabel(i, data.name, i < 2 ? 'rgba(255,255,255,0.9)' : 'rgba(100,200,255,0.9)');
+      }
+      
+      if (this.trailLines && this.trailLines[i]) {
+          this.trailLines[i].visible = this.options.showTrails && mesh.visible;
+          if (i < 2) {
+              this.trailLines[i].material.color.setStyle(data.color);
+          } else {
+              this.trailLines[i].material.color.setHex(0x4a9eff);
+          }
       }
     }
 
-    // UI overlays
-    if (options.showScaleBar) this._drawScaleBar();
-    this._drawObserverIndicator();
-
-    // Exaggeration notice
-    ctx.fillStyle = 'rgba(255,200,100,0.5)';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`★ Stellar radii ×${this.EXAGGERATION_STAR}, planet ×${this.EXAGGERATION_PLANET} (orbits to scale)`, 10, H - 10);
-
-    // Time display
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(`t = ${(t * 365.25).toFixed(1)} days`, W - 10, 20);
+    this.renderer.render(this.scene, this.camera);
+    
+    // Draw 2D overlays on a separate canvas context if we want to keep ScaleBar and ObserverIndicator.
+    // However, for brevity and compatibility with existing index.html canvas setup, we will create an overlay or just ignore it.
+    // Given the WebGL transition, it's typical to draw UI on a separate 2D canvas. We'll skip the scale bar in this WebGL context for now, or the user can add it in CSS.
   }
 
-  /**
-   * Resize canvas to match display size.
-   */
   resize() {
-    const { canvas } = this;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width  = rect.width  * window.devicePixelRatio;
-    canvas.height = rect.height * window.devicePixelRatio;
-    this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-    // Regenerate starfield for new size
-    this.starfield = this._generateStarfield();
+    if (!this.renderer) return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.canvas.width = rect.width * window.devicePixelRatio;
+    this.canvas.height = rect.height * window.devicePixelRatio;
+    this.renderer.setSize(rect.width, rect.height, false);
+    this.camera.aspect = rect.width / rect.height;
+    this.camera.updateProjectionMatrix();
   }
 
   clearTrails() {
     this.trails = [[], [], []];
+    if (this.trailLines) {
+        this.trailLines.forEach(l => l.geometry.setDrawRange(0, 0));
+    }
+  }
+
+  /** Set camera focus target.
+   * @param {string|number} target - 'system', 'reset', 'starA', 'starB', 'planet', or 0/1/2
+   */
+  setFocusTarget(target) {
+    if (target === 'reset' || target === 'system') {
+      this.controls.targetId = 'system';
+      this.controls.targetAzimuth   = 0;
+      this.controls.targetElevation = 0;
+      this.controls.targetPanX      = 0;
+      this.controls.targetPanY      = 0;
+      this.options.targetScaleAU    = Math.min(this.canvas.width, this.canvas.height) / (window.devicePixelRatio * 2);
+    } else if (target === 'starA' || target === 0) {
+      this.controls.targetId  = 0;
+      this.controls.targetPanX      = 0;
+      this.controls.targetPanY      = 0;
+      this.options.targetScaleAU = 1000;
+    } else if (target === 'starB' || target === 1) {
+      this.controls.targetId  = 1;
+      this.controls.targetPanX      = 0;
+      this.controls.targetPanY      = 0;
+      this.options.targetScaleAU = 1000;
+    } else if (target === 'planet' || target === 2) {
+      this.controls.targetId  = 2;
+      this.controls.targetPanX      = 0;
+      this.controls.targetPanY      = 0;
+      this.options.targetScaleAU = 1500;
+    }
   }
 }

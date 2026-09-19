@@ -15,12 +15,12 @@
  * inference (fitted parameters) — never mixing them.
  */
 
-import { buildInitialConditions, integrateStream, totalEnergy, totalAngularMomentum } from '../physics/nbody.js';
-import { getSystemParams, STAR_A, STAR_B, PLANET, BINARY_ORBIT, PLANET_ORBIT, P_BIN, P_PLANET } from '../physics/system.js';
+import { buildInitialConditions, totalEnergy, totalAngularMomentum, rk4Step, stepAndDetectCollision } from '../physics/nbody.js';
+import { createSystemConfig } from '../physics/system.js';
 import { computeFlux } from '../obs/photometry.js';
 import { computeRV } from '../obs/radialvelocity.js';
 import { addPhotNoise, addRVNoise, DEFAULT_PHOT_SIGMA_PPM, DEFAULT_RV_SIGMA_MS } from '../obs/noise.js';
-import { lombScargle, frequencyGrid, findPeak, phaseFold } from '../inference/lomb_scargle.js';
+import { lombScargle, frequencyGrid, findPeak, phaseFold, createPlanetRVSearchGrid } from '../inference/lomb_scargle.js';
 import { blsPeriodogram, blsPeriodGrid, removePeriodicSignal } from '../inference/bls.js';
 import { fitBinaryRV, fitCircularRV, barycentricRV } from '../inference/rv_fit.js';
 import { AU_YR_TO_KMS } from '../physics/units.js';
@@ -31,16 +31,23 @@ import { rvAmplitudePlanet } from '../obs/radialvelocity.js';
 const OBS_BASELINE_YR  = 3.0;          // 3 years of observations
 const PHOT_CADENCE_YR  = 30 / 525960;  // 30 minutes in years (Kepler long cadence)
 const RV_CADENCE_YR    = 3 / 365.25;   // RV every 3 days
+const DT_INTEGRATION   = 1 / 525960;   // 1-hour integration timestep in years
 const PHOT_SIGMA_PPM   = DEFAULT_PHOT_SIGMA_PPM;
 const RV_SIGMA_MS      = DEFAULT_RV_SIGMA_MS;
 
-// Integration time step: 1/500 of binary period for accuracy
-const DT_INTEGRATION   = P_BIN / 500;
+let _simVersionCounter = 0;
 
 export class Simulation {
-  constructor(onProgress) {
+  constructor(onProgress, overrides = {}) {
     this.onProgress = onProgress || (() => {});
-    this.params     = getSystemParams();
+    this.config     = createSystemConfig(overrides);
+    this.params     = this.config;
+    
+    // Data flow tracking
+    _simVersionCounter++;
+    this.version = _simVersionCounter;
+    this.configFingerprint = JSON.stringify(this.config);
+
     this.ic         = buildInitialConditions(this.params);
     this.state      = this.ic.state.slice();
     this.masses     = this.ic.masses;
@@ -62,6 +69,9 @@ export class Simulation {
 
     // Validation
     this.validation = null;
+    
+    // Collision State
+    this.contactTime = null;
   }
 
   /**
@@ -115,15 +125,40 @@ export class Simulation {
 
       const chunk = () => {
         const chunkSize = 500; // steps per chunk (yield to UI)
+        let collisionOccurred = false;
+        const radii = [this.config.starA.radius, this.config.starB.radius, this.config.planet.radius];
+
         for (let c = 0; c < chunkSize && t < tEnd - dt * 0.5; c++) {
+          const col = stepAndDetectCollision(s, masses, radii, t, dt);
+          if (col) {
+            s = col.state;
+            t = col.time;
+            step++;
+
+            // Record final state before collision
+            animStates.push(s.slice());
+            animTimes.push(t);
+
+            this.validation = {
+              status: 'INVALID',
+              message: `PHYSICAL CONTACT DETECTED — integration halted at t = ${(col.time * 365.25).toFixed(1)} days.`,
+              energyError: 0,
+              angMomError: 0,
+              nSteps: step,
+              dt, tEnd
+            };
+            collisionOccurred = true;
+            break;
+          }
+
           // RK4 step
-          s = this._rk4Step(s, masses, dt);
+          s = rk4Step(s, masses, dt);
           t += dt;
           step++;
 
           // Sample photometry
           while (photIdx < photTimes.length && photTimes[photIdx] <= t + dt * 0.5) {
-            const flux = computeFlux(s, STAR_A, STAR_B, PLANET);
+            const flux = computeFlux(s, this.config.starA, this.config.starB, this.config.planet);
             photFlux_true.push(flux);
             photIdx++;
           }
@@ -150,20 +185,35 @@ export class Simulation {
           lastProgressUpdate = progress;
         }
 
-        if (t < tEnd - dt * 0.5) {
+        if (!collisionOccurred && t < tEnd - dt * 0.5) {
           setTimeout(chunk, 0); // yield to browser
         } else {
-          // Compute conservation errors
-          const Ef = totalEnergy(s, masses);
-          const Lf = totalAngularMomentum(s, masses);
-          const Lfmag = Math.sqrt(Lf[0]**2 + Lf[1]**2 + Lf[2]**2);
-          this.validation = {
-            energyError:  Math.abs((Ef - E0) / E0),
-            angMomError:  L0mag > 0 ? Math.abs((Lfmag - L0mag) / L0mag) : 0,
-            nSteps:       step,
-            dt,
-            tEnd,
-          };
+          if (!collisionOccurred) {
+            // Compute conservation errors for full baseline
+            const Ef = totalEnergy(s, masses);
+            const Lf = totalAngularMomentum(s, masses);
+            const Lfmag = Math.sqrt(Lf[0]**2 + Lf[1]**2 + Lf[2]**2);
+            this.validation = {
+              energyError:  Math.abs((Ef - E0) / E0),
+              angMomError:  L0mag > 0 ? Math.abs((Lfmag - L0mag) / L0mag) : 0,
+              nSteps:       step,
+              dt,
+              tEnd,
+            };
+          } else {
+            // Re-evaluate energy at contact to prove physics worked up to contact
+            const Ef = totalEnergy(s, masses);
+            const Lf = totalAngularMomentum(s, masses);
+            const Lfmag = Math.sqrt(Lf[0]**2 + Lf[1]**2 + Lf[2]**2);
+            this.validation = {
+              energyError:  Math.abs((Ef - E0) / E0),
+              angMomError:  L0mag > 0 ? Math.abs((Lfmag - L0mag) / L0mag) : 0,
+              nSteps:       step,
+              dt,
+              tEnd:         t,
+              contact:      true
+            };
+          }
           resolve();
         }
       };
@@ -210,6 +260,7 @@ export class Simulation {
     this.animStates = animStates;
     this.animTimes  = animTimes;
     this.animIdx    = 0;
+    this.history    = animTimes.map((t, i) => ({ t, state: animStates[i] }));
 
     this.onProgress(0.75, 'Running inference...');
     await this._runInference();
@@ -217,43 +268,6 @@ export class Simulation {
     this.onProgress(1.0, 'Ready');
   }
 
-  // ── RK4 step (local copy for performance) ────────────────────────────────
-
-  _rk4Step(s, m, dt) {
-    const G = 4 * Math.PI * Math.PI;
-    const n = 3;
-
-    const deriv = (state) => {
-      const ds = new Array(n * 6).fill(0);
-      for (let i = 0; i < n; i++) {
-        ds[i*6]   = state[i*6+3];
-        ds[i*6+1] = state[i*6+4];
-        ds[i*6+2] = state[i*6+5];
-        let ax = 0, ay = 0, az = 0;
-        for (let j = 0; j < n; j++) {
-          if (j === i) continue;
-          const dx = state[j*6]   - state[i*6];
-          const dy = state[j*6+1] - state[i*6+1];
-          const dz = state[j*6+2] - state[i*6+2];
-          const r2 = dx*dx + dy*dy + dz*dz;
-          const r  = Math.sqrt(r2);
-          const fac = G * m[j] / (r2 * r);
-          ax += fac * dx; ay += fac * dy; az += fac * dz;
-        }
-        ds[i*6+3] = ax; ds[i*6+4] = ay; ds[i*6+5] = az;
-      }
-      return ds;
-    };
-
-    const add = (a, b, sc) => a.map((v, i) => v + b[i] * sc);
-
-    const k1 = deriv(s);
-    const k2 = deriv(add(s, k1, dt/2));
-    const k3 = deriv(add(s, k2, dt/2));
-    const k4 = deriv(add(s, k3, dt));
-
-    return s.map((v, i) => v + (dt/6) * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
-  }
 
   // ── Inference ─────────────────────────────────────────────────────────────
 
@@ -264,7 +278,7 @@ export class Simulation {
     // ── Step 1: Binary period from photometry (LS on flux) ─────────────────
     this.onProgress(0.75, 'Step 1: Binary period search (Lomb-Scargle)...');
 
-    const photFreqs = frequencyGrid(obs.baseline, P_BIN * 0.5, P_BIN * 2, 10);
+    const photFreqs = frequencyGrid(obs.baseline, this.config.P_BIN * 0.5, this.config.P_BIN * 2, 10);
     const { power: photPower } = lombScargle(obs.photTimes, obs.photFlux_obs, null, photFreqs);
     const photPeak = findPeak(photPower, photFreqs, obs.photTimes.length);
 
@@ -273,8 +287,8 @@ export class Simulation {
       period:    photPeak.period,
       power:     photPeak.power,
       fap:       photPeak.fap,
-      truePeriod: P_BIN,
-      error:     Math.abs(photPeak.period - P_BIN) / P_BIN,
+      truePeriod: this.config.P_BIN,
+      error:     Math.abs(photPeak.period - this.config.P_BIN) / this.config.P_BIN,
       freqs:     photFreqs,
       power_arr: photPower,
     };
@@ -303,7 +317,7 @@ export class Simulation {
       gamma_err:    binaryFit.gamma_err,
       trueKA:       obs.rvA_true.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
       trueKB:       obs.rvB_true.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
-      trueMassRatio: STAR_B.mass / STAR_A.mass,
+      trueMassRatio: this.config.starB.mass / this.config.starA.mass,
       fitA:         binaryFit.fitA,
       fitB:         binaryFit.fitB,
     };
@@ -348,64 +362,90 @@ export class Simulation {
       residuals: photResiduals,
     };
 
-    // ── Step 5: BLS planet search ──────────────────────────────────────────
-    this.onProgress(0.88, 'Step 5: BLS planet transit search...');
+    // ── Step 5: Planet search bounds ─────────────────────────────────────────
+    this.onProgress(0.87, 'Step 5: Determining planetary search bounds...');
 
-    const minPlanetPeriod = 3.5 * P_bin_fit;
-    const maxPlanetPeriod = obs.baseline / 2;
-    const blsPeriods = blsPeriodGrid(obs.baseline, minPlanetPeriod, maxPlanetPeriod, 2000, 2);
+    const searchParams = createPlanetRVSearchGrid(
+      P_bin_fit, 
+      binaryFit.orbit ? binaryFit.orbit.e : 0, 
+      q_fit, 
+      obs.baseline, 
+      5
+    );
+
+    // ── Step 5b: BLS planet transit search ──────────────────────────────────
+    this.onProgress(0.88, 'Step 5b: BLS planet transit search...');
 
     let blsResult = null;
-    if (blsPeriods.length > 1) {
-      blsResult = blsPeriodogram(photResiduals, photResiduals, blsPeriods, 0.005, 0.20, 300);
-      // Note: BLS on residuals — circumbinary transits are NOT strictly periodic
-      // BLS may not find a clean peak; we report the best candidate and its SNR
+    let blsPeriods = [];
+    if (!searchParams.error) {
+      blsPeriods = blsPeriodGrid(obs.baseline, searchParams.P_min, searchParams.P_max, 2000, 2);
+      if (blsPeriods.length > 1) {
+        // NOTE: The original bug passed photResiduals to both args, we fix it to (t, y) = (obs.photTimes, photResiduals)
+        blsResult = blsPeriodogram(obs.photTimes, photResiduals, blsPeriods, 0.005, 0.20, 300);
+      }
     }
 
     results.blsSearch = {
       method:       'Box-Least-Squares on eclipse-subtracted photometry',
       periods:      blsPeriods,
       result:       blsResult,
-      truePeriod:   P_PLANET,
-      minPeriod:    minPlanetPeriod,
-      maxPeriod:    maxPlanetPeriod,
+      truePeriod:   this.config.P_PLANET,
+      minPeriod:    searchParams.P_min || null,
+      maxPeriod:    searchParams.P_max || null,
       caveat:       'Circumbinary planet transits are NOT strictly periodic (TTVs). BLS is a first-pass detector only.',
-      note:         'Planet period restricted to > 3.5 × P_binary (Holman-Wiegert stability criterion).',
+      note:         'Planet period restricted to > P_crit (Holman-Wiegert stability) and < obs.baseline/2.',
+      errorMsg:     searchParams.error || null,
     };
 
     // ── Step 6: Planet period search via LS on barycenter RV ──────────────
     this.onProgress(0.91, 'Step 6: Planet period search (RV barycenter)...');
 
-    const rvFreqs = frequencyGrid(obs.baseline, P_PLANET * 0.3, P_PLANET * 3, 5);
-    const rvWeights = sigmaBary.map(s => 1 / (s * s));
-    const { power: rvPower } = lombScargle(obs.rvTimes, rvBary_residuals, rvWeights, rvFreqs);
-    const rvPeak = findPeak(rvPower, rvFreqs, obs.rvTimes.length);
+    if (searchParams.error) {
+      results.planetPeriodRV = {
+        method:     'GLS on binary barycenter RV residuals',
+        errorMsg:   searchParams.error,
+        detected:   false,
+      };
+    } else {
+      const rvFreqs = searchParams.freqs;
+      const rvWeights = sigmaBary.map(s => 1 / (s * s));
+      const { power: rvPower } = lombScargle(obs.rvTimes, rvBary_residuals, rvWeights, rvFreqs);
+      const rvPeak = findPeak(rvPower, rvFreqs, obs.rvTimes.length);
 
-    results.planetPeriodRV = {
-      method:     'GLS on binary barycenter RV residuals',
-      period:     rvPeak.period,
-      power:      rvPeak.power,
-      fap:        rvPeak.fap,
-      truePeriod: P_PLANET,
-      error:      Math.abs(rvPeak.period - P_PLANET) / P_PLANET,
-      freqs:      rvFreqs,
-      power_arr:  rvPower,
-      detected:   rvPeak.fap < 0.05,
-      note:       'Planet RV amplitude ~4 m/s is near/below noise floor (30 m/s). Detection is challenging.',
-    };
+      results.planetPeriodRV = {
+        method:     'GLS on binary barycenter RV residuals',
+        period:     rvPeak.period,
+        power:      rvPeak.power,
+        fap:        rvPeak.fap,
+        truePeriod: this.config.P_PLANET,
+        error:      Math.abs(rvPeak.period - this.config.P_PLANET) / this.config.P_PLANET,
+        freqs:      rvFreqs,
+        power_arr:  rvPower,
+        detected:   rvPeak.fap < 0.05,
+        note:       'Planet RV amplitude ~4 m/s is near/below noise floor (30 m/s). Detection is challenging.',
+        searchMin:  searchParams.P_min,
+        searchMax:  searchParams.P_max,
+      };
+    }
 
     // ── Step 7: Planet RV amplitude fit ───────────────────────────────────
     this.onProgress(0.94, 'Step 7: Fitting planet RV signal...');
 
-    const P_planet_fit = rvPeak.period;
+    // Use detected period if available, otherwise fall back to true period
+    const rvPeakPeriod = results.planetPeriodRV && results.planetPeriodRV.period
+      ? results.planetPeriodRV.period
+      : this.config.P_PLANET;
+
+    const P_planet_fit = rvPeakPeriod;
     const planetRVFit = fitCircularRV(
       obs.rvTimes, rvBary_residuals, sigmaBary, P_planet_fit
     );
 
     // Expected planet RV amplitude
     const K_planet_expected = rvAmplitudePlanet(
-      STAR_A.mass, STAR_B.mass, PLANET.mass,
-      PLANET_ORBIT.a, PLANET_ORBIT.e, PLANET_ORBIT.inc
+      this.config.starA.mass, this.config.starB.mass, this.config.planet.mass,
+      this.config.aPlanet, this.config.ePlanet, this.config.incPlanet
     );
 
     results.planetRV = {

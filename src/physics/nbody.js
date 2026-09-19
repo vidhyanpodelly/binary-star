@@ -76,7 +76,7 @@ function addScaled(a, b, scale) {
   return out;
 }
 
-function rk4Step(s, m, dt) {
+export function rk4Step(s, m, dt) {
   const k1 = derivatives(s, m);
   const k2 = derivatives(addScaled(s, k1, dt/2), m);
   const k3 = derivatives(addScaled(s, k2, dt/2), m);
@@ -220,7 +220,7 @@ export function buildInitialConditions(p) {
 
   // ── Planet: orbits binary CoM ──────────────────────────────────────────────
   const rPlanet = aPlanet * (1 - ePlanet);
-  const vPlanet = Math.sqrt(G * mBin * (2/rPlanet - 1/aPlanet));
+  const vPlanet = Math.sqrt(G * mTot * (2/rPlanet - 1/aPlanet));
 
   const [xP, yP, zP] = rotateOrbit(rPlanet, 0, omegaPlanet, incPlanet);
   const [vxP, vyP, vzP] = rotateVel(0, vPlanet, omegaPlanet, incPlanet);
@@ -319,4 +319,26 @@ export function getPosition(state, bodyIndex) {
 
 export function getVelocity(state, bodyIndex) {
   return [state[bodyIndex*6+3], state[bodyIndex*6+4], state[bodyIndex*6+5]];
+}
+
+/**
+ * Step the system and check for collisions between the planet and either star.
+ * Returns { collision: true, bodies: [body1, body2] } if collision, else null.
+ */
+export function stepAndDetectCollision(s, masses, radii, t, dt) {
+  rk4Step(s, masses, dt);
+  
+  const dxA = s.xA - s.xP;
+  const dyA = s.yA - s.yP;
+  const dzA = s.zA - s.zP;
+  const dAP = Math.sqrt(dxA*dxA + dyA*dyA + dzA*dzA);
+  if (dAP <= radii[0] + radii[2]) return { collision: true, bodies: ['starA', 'planet'] };
+  
+  const dxB = s.xB - s.xP;
+  const dyB = s.yB - s.yP;
+  const dzB = s.zB - s.zP;
+  const dBP = Math.sqrt(dxB*dxB + dyB*dyB + dzB*dzB);
+  if (dBP <= radii[1] + radii[2]) return { collision: true, bodies: ['starB', 'planet'] };
+  
+  return null;
 }

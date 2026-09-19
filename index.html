@@ -515,6 +515,14 @@
       #sidebar { max-height: 400px; }
     }
   </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./node_modules/three/build/three.module.js",
+        "three/addons/": "./node_modules/three/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
 
@@ -576,15 +584,20 @@
         <canvas id="plot-canvas" aria-label="Scientific data plot"></canvas>
       </div>
     </div>
+
+    <!-- Dedicated Black Hole viewport -->
+    <div id="bh-canvas-container" style="display:none; flex: 1; position: relative; overflow: hidden; background: #000;"></div>
   </main>
 
   <!-- Sidebar -->
   <aside id="sidebar">
     <div id="workflow-tabs" role="tablist">
       <button class="workflow-tab active" data-panel="observatory" role="tab">Observatory</button>
+      <button class="workflow-tab" data-panel="builder" role="tab">Builder</button>
       <button class="workflow-tab" data-panel="observations" role="tab">Observations</button>
       <button class="workflow-tab" data-panel="analysis" role="tab">Analysis</button>
       <button class="workflow-tab" data-panel="discovery" role="tab">Discovery</button>
+      <button class="workflow-tab" data-panel="blackhole" role="tab" style="color:#ff6b35;">⚫ Black Hole</button>
     </div>
 
     <div id="sidebar-content">
@@ -674,6 +687,70 @@
           <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;cursor:pointer;">
             <input type="checkbox" id="chk-truth"> Show true flux (plot)
           </label>
+        </div>
+        <div class="panel-section">
+          <h3>Camera Focus</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+            <button class="btn" id="btn-cam-system" style="font-size:0.72rem;padding:6px;">System</button>
+            <button class="btn" id="btn-cam-reset" style="font-size:0.72rem;padding:6px;">Reset</button>
+            <button class="btn" id="btn-cam-starA" style="font-size:0.72rem;padding:6px;">Star A</button>
+            <button class="btn" id="btn-cam-starB" style="font-size:0.72rem;padding:6px;">Star B</button>
+            <button class="btn" id="btn-cam-planet" style="font-size:0.72rem;padding:6px;grid-column:1/-1;">Planet</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Builder panel -->
+      <div class="panel" id="panel-builder">
+        <div class="panel-section">
+          <h3>SYSTEM BUILDER</h3>
+          <p style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 12px; line-height: 1.4;">Adjust the physical parameters of the Kepler-16 analog system to explore how they affect observations and inference.</p>
+          
+          <div class="param-row">
+            <span class="param-label">Star A Mass (M☉)</span>
+            <input type="range" id="slider-mA" min="0.1" max="1.5" step="0.01" value="0.69" style="width: 80px;">
+            <span class="param-value" id="val-slider-mA">0.69</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Star A Radius (R☉)</span>
+            <input type="range" id="slider-rA" min="0.1" max="1.5" step="0.01" value="0.65" style="width: 80px;">
+            <span class="param-value" id="val-slider-rA">0.65</span>
+          </div>
+          
+          <div class="param-row" style="margin-top: 10px;">
+            <span class="param-label">Star B Mass (M☉)</span>
+            <input type="range" id="slider-mB" min="0.05" max="0.5" step="0.01" value="0.2" style="width: 80px;">
+            <span class="param-value" id="val-slider-mB">0.2</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Star B Radius (R☉)</span>
+            <input type="range" id="slider-rB" min="0.05" max="0.5" step="0.01" value="0.23" style="width: 80px;">
+            <span class="param-value" id="val-slider-rB">0.23</span>
+          </div>
+          
+          <div class="param-row" style="margin-top: 10px;">
+            <span class="param-label">Binary a (AU)</span>
+            <input type="range" id="slider-aBin" min="0.1" max="0.5" step="0.01" value="0.22" style="width: 80px;">
+            <span class="param-value" id="val-slider-aBin">0.22</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Binary e</span>
+            <input type="range" id="slider-eBin" min="0" max="0.8" step="0.01" value="0.16" style="width: 80px;">
+            <span class="param-value" id="val-slider-eBin">0.16</span>
+          </div>
+          
+          <div class="param-row" style="margin-top: 10px;">
+            <span class="param-label">Planet a (AU)</span>
+            <input type="range" id="slider-aPlanet" min="0.5" max="1.5" step="0.01" value="0.7" style="width: 80px;">
+            <span class="param-value" id="val-slider-aPlanet">0.7</span>
+          </div>
+          <div class="param-row">
+            <span class="param-label">Planet Mass (M_Jup)</span>
+            <input type="range" id="slider-mPlanet" min="0.05" max="5.0" step="0.01" value="0.1" style="width: 80px;">
+            <span class="param-value" id="val-slider-mPlanet">0.1</span>
+          </div>
+          
+          <button id="btn-apply-builder" class="btn" style="width: 100%; margin-top: 15px;">Apply & Recompute</button>
         </div>
       </div>
 
@@ -874,6 +951,24 @@
         </div>
       </div>
 
+      <!-- Black Hole panel -->
+      <div class="panel" id="panel-blackhole">
+        <div class="panel-section">
+          <h3>⚫ Black Hole Visualization</h3>
+          <p style="font-size:0.72rem;color:var(--text-dim);margin-bottom:10px;line-height:1.5;">
+            Relativistic-inspired visualization (approximation). Not general-relativistic ray tracing.
+          </p>
+          <div style="margin-top:10px;">
+            <div class="param-row"><span class="param-label">Mass</span><span class="param-value">~10 M☉ (stellar BH)</span></div>
+            <div class="param-row"><span class="param-label">Schwarzschild radius</span><span class="param-value">~30 km</span></div>
+            <div class="param-row"><span class="param-label">Accretion disk</span><span class="param-value">Lensed (approximation)</span></div>
+          </div>
+          <div class="info-box" style="margin-top:10px;">
+            <strong>Note:</strong> Inspired by Luminet (1979) and Interstellar imagery. Disk warping approximated with geometry shaders, not ray-traced.
+          </div>
+        </div>
+      </div>
+
     </div><!-- sidebar-content -->
   </aside>
 
@@ -890,7 +985,8 @@
 import { Simulation } from './src/ui/simulation.js';
 import { Renderer }   from './src/render/renderer.js';
 import { PlotRenderer } from './src/ui/plots.js';
-import { STAR_A, STAR_B, PLANET, P_BIN, P_PLANET } from './src/physics/system.js';
+import { NewBlackHoleRenderer } from './src/render/new_blackhole.js';
+// STAR_A/STAR_B/PLANET/P_BIN/P_PLANET are read from sim.config after initialization
 
 // ── Canvas setup ──────────────────────────────────────────────────────────────
 
@@ -942,7 +1038,12 @@ function onProgress(fraction, msg) {
 // ── Initialize ────────────────────────────────────────────────────────────────
 
 async function init() {
-  sim = new Simulation(onProgress);
+  const params = new URLSearchParams(window.location.search);
+  const overrides = {};
+  for (const [key, val] of params.entries()) {
+    overrides[key] = parseFloat(val);
+  }
+  sim = new Simulation(onProgress, overrides);
   await sim.precompute();
 
   // Hide loading
@@ -1040,7 +1141,7 @@ function startAnimation() {
     if (sim && sim.animStates) {
       const state = sim.getAnimState();
       const t     = sim.getAnimTime();
-      renderer.render(state, STAR_A, STAR_B, PLANET, t, planetRevealed);
+      renderer.render(state, sim.config.starA, sim.config.starB, sim.config.planet, t, planetRevealed);
     }
   }
 
@@ -1077,7 +1178,7 @@ function renderPlot() {
           inf.binaryPeriod.freqs,
           inf.binaryPeriod.power_arr,
           inf.binaryPeriod.period,
-          P_BIN,
+          sim.config.P_BIN,
           'Lomb-Scargle Periodogram — Binary Period Search'
         );
       }
@@ -1094,6 +1195,44 @@ function renderPlot() {
 }
 
 // ── UI event handlers ─────────────────────────────────────────────────────────
+
+// Camera controls
+document.getElementById('btn-cam-system')?.addEventListener('click', () => {
+  if (renderer) renderer.setFocusTarget('system');
+});
+document.getElementById('btn-cam-reset')?.addEventListener('click', () => {
+  if (renderer) renderer.setFocusTarget('reset');
+});
+document.getElementById('btn-cam-starA')?.addEventListener('click', () => {
+  if (renderer) renderer.setFocusTarget('starA');
+});
+document.getElementById('btn-cam-starB')?.addEventListener('click', () => {
+  if (renderer) renderer.setFocusTarget('starB');
+});
+document.getElementById('btn-cam-planet')?.addEventListener('click', () => {
+  if (renderer) renderer.setFocusTarget('planet');
+});
+
+// Builder logic
+const builderParams = ['mA', 'rA', 'mB', 'rB', 'aBin', 'eBin', 'aPlanet', 'mPlanet'];
+builderParams.forEach(p => {
+  const slider = document.getElementById(`slider-${p}`);
+  const val = document.getElementById(`val-slider-${p}`);
+  if (slider && val) {
+    slider.addEventListener('input', (e) => {
+      val.textContent = e.target.value;
+    });
+  }
+});
+
+document.getElementById('btn-apply-builder')?.addEventListener('click', () => {
+  const params = new URLSearchParams(window.location.search);
+  builderParams.forEach(p => {
+    const slider = document.getElementById(`slider-${p}`);
+    if (slider) params.set(p, slider.value);
+  });
+  window.location.search = params.toString();
+});
 
 // Play/pause
 document.getElementById('btn-play').addEventListener('click', () => {
@@ -1164,6 +1303,10 @@ document.getElementById('btn-reveal').addEventListener('click', () => {
   overlay.classList.add('active');
   setTimeout(() => overlay.classList.remove('active'), 3000);
 
+  // Show planet camera button
+  const camP = document.getElementById('btn-cam-planet');
+  if (camP) camP.style.display = 'inline-block';
+
   // Show reveal results
   document.getElementById('reveal-results').style.display = 'block';
   document.getElementById('btn-reveal').disabled = true;
@@ -1212,6 +1355,37 @@ init().catch(err => {
   console.error('Initialization failed:', err);
   document.getElementById('progress-msg').textContent = `Error: ${err.message}`;
   document.getElementById('progress-bar').style.background = '#ff4444';
+});
+// ── Black Hole Visualization ──────────────────────────────────────────────────
+
+let bhRenderer = null;
+
+document.querySelectorAll('.workflow-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (tab.dataset.panel === 'blackhole') {
+      document.getElementById('sim-container').style.display = 'none';
+      document.getElementById('plot-area').style.display = 'none';
+      
+      const container = document.getElementById('bh-canvas-container');
+      container.style.display = 'block';
+
+      if (!bhRenderer) {
+        bhRenderer = new NewBlackHoleRenderer(container);
+      }
+      // Small delay to let panel become visible before sizing
+      setTimeout(() => bhRenderer.start(), 50);
+    } else {
+      document.getElementById('sim-container').style.display = '';
+      document.getElementById('plot-area').style.display = 'flex';
+      
+      const container = document.getElementById('bh-canvas-container');
+      container.style.display = 'none';
+
+      if (bhRenderer) {
+        bhRenderer.stop();
+      }
+    }
+  });
 });
 </script>
 </body>
